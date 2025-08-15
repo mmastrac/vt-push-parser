@@ -430,7 +430,6 @@ pub struct VTPushParser {
     used_bel: bool,
 
     // Limits
-    max_short_hdr: usize,
     stream_flush: usize,
 }
 
@@ -445,13 +444,11 @@ impl VTPushParser {
             priv_prefix: None,
             stream_buf: Vec::with_capacity(8192),
             used_bel: false,
-            max_short_hdr: 4096,
             stream_flush: 8192,
         }
     }
 
-    pub fn with_limits(mut self, max_short_hdr: usize, stream_flush: usize) -> Self {
-        self.max_short_hdr = max_short_hdr;
+    pub fn with_stream_flush_max(mut self, stream_flush: usize) -> Self {
         self.stream_flush = stream_flush.max(1);
         self
     }
@@ -1167,6 +1164,9 @@ Csi(, '8', '34', '148', '', 't')
             result.trim(),
             "DcsStart(, ' ', 1)\nDcsData(';2;3  |data')\nDcsEnd"
         );
+
+        let result = decode_stream(b"\x1bP1$r\x1b\\");
+        assert_eq!(result.trim(), "DcsStart(, '1', '$', r)\nDcsEnd");
     }
 
     #[test]
@@ -1344,21 +1344,22 @@ Csi(, '8', '34', '148', '', 't')
     #[test]
     fn test_streaming_behavior() {
         // Test streaming DCS data
-        let mut parser = VTPushParser::new().with_limits(1024, 4); // Small flush size
+        let mut parser = VTPushParser::new().with_stream_flush_max(4); // Small flush size
         let mut result = String::new();
         let mut callback = |vt_input: VTEvent<'_>| {
             result.push_str(&format!("{:?}\n", vt_input));
         };
 
         // Feed DCS data in chunks
-        parser.feed_with(b"\x1bP 1;2;3|", &mut callback);
+        parser.feed_with(b"\x1bP1;2;3 |", &mut callback);
         parser.feed_with(b"data", &mut callback);
         parser.feed_with(b" more", &mut callback);
         parser.feed_with(b"\x1b\\", &mut callback);
 
-        assert!(result.contains("DcsStart"));
-        assert!(result.contains("DcsData"));
-        assert!(result.contains("DcsEnd"));
+        assert_eq!(
+            result.trim(),
+            "DcsStart(, '1', '2', '3', ' ', |)\nDcsData('data')\nDcsData(' mor')\nDcsData('e')\nDcsEnd"
+        );
     }
 
     #[test]
