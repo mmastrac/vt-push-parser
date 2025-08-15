@@ -241,6 +241,7 @@ pub enum VTEvent<'a> {
     },
     DcsData(&'a [u8]),
     DcsEnd,
+    DcsCancel,
 
     // OSC stream
     OscStart,
@@ -248,6 +249,7 @@ pub enum VTEvent<'a> {
     OscEnd {
         used_bel: bool,
     },
+    OscCancel,
 }
 
 impl<'a> std::fmt::Debug for VTEvent<'a> {
@@ -317,7 +319,14 @@ impl<'a> std::fmt::Debug for VTEvent<'a> {
                     write!(f, "{:?}", *p as char)?;
                 }
                 for param in params {
-                    write!(f, ", {:02x?}", param)?;
+                    write!(f, ", '")?;
+                    for chunk in param.utf8_chunks() {
+                        write!(f, "{}", chunk.valid())?;
+                        if !chunk.invalid().is_empty() {
+                            write!(f, "<{}>", hex::encode(chunk.invalid()))?;
+                        }
+                    }
+                    write!(f, "'")?;
                 }
                 write!(f, ", {:?}", intermediates)?;
                 write!(f, ", {})", *final_byte as char)?;
@@ -335,6 +344,7 @@ impl<'a> std::fmt::Debug for VTEvent<'a> {
                 Ok(())
             }
             VTEvent::DcsEnd => write!(f, "DcsEnd"),
+            VTEvent::DcsCancel => write!(f, "DcsCancel"),
             VTEvent::OscStart => write!(f, "OscStart"),
             VTEvent::OscData(s) => {
                 write!(f, "OscData('")?;
@@ -351,6 +361,7 @@ impl<'a> std::fmt::Debug for VTEvent<'a> {
                 write!(f, "OscEnd")?;
                 Ok(())
             }
+            VTEvent::OscCancel => write!(f, "OscCancel"),
         }
     }
 }
@@ -393,6 +404,7 @@ enum State {
     DcsParam,
     DcsInt,
     DcsIgnore,
+    DcsIgnoreEsc,
     DcsPassthrough,
     DcsEsc,
     OscString,
@@ -452,7 +464,6 @@ impl VTPushParser {
         for &b in input {
             self.push_with(b, &mut cb);
         }
-        // Emitting pending raw at end-of-chunk helps coalesce; you can remove if undesired.
         self.flush_raw_if_any(&mut cb);
     }
 
@@ -472,6 +483,7 @@ impl VTPushParser {
             DcsParam => self.on_dcs_param(b, cb),
             DcsInt => self.on_dcs_int(b, cb),
             DcsIgnore => self.on_dcs_ignore(b, cb),
+            DcsIgnoreEsc => self.on_dcs_ignore_esc(b, cb),
             DcsPassthrough => self.on_dcs_pass(b, cb),
             DcsEsc => self.on_dcs_esc(b, cb),
 
@@ -912,17 +924,31 @@ impl VTPushParser {
             }
             DEL => {}
             ESC => {
-                self.st = Escape;
+                self.st = DcsIgnoreEsc;
             }
-            // stay until ST (handled in DcsEsc path if you want); we just drop here.
             _ => {}
+        }
+    }
+    fn on_dcs_ignore_esc<F: FnMut(VTEvent)>(&mut self, b: u8, cb: &mut F) {
+        use State::*;
+        match b {
+            CAN | SUB => {
+                self.st = Ground;
+            }
+            ST_FINAL => {
+                self.st = Ground;
+            }
+            DEL => {}
+            _ => {
+                self.st = DcsIgnore;
+            }
         }
     }
     fn on_dcs_pass<F: FnMut(VTEvent)>(&mut self, b: u8, cb: &mut F) {
         use State::*;
         match b {
             CAN | SUB => {
-                self.dcs_end(cb);
+                cb(VTEvent::DcsCancel);
                 self.st = Ground;
             }
             DEL => {}
@@ -942,7 +968,8 @@ impl VTPushParser {
                 self.st = Ground;
             } // ST
             ESC => {
-                self.dcs_put(ESC, cb); /* remain in DcsEsc */
+                self.dcs_put(ESC, cb);
+                self.st = DcsPassthrough;
             }
             _ => {
                 self.dcs_put(ESC, cb);
@@ -958,6 +985,7 @@ impl VTPushParser {
         match b {
             CAN | SUB => {
                 self.reset_collectors();
+                cb(VTEvent::OscCancel);
                 self.st = Ground;
             }
             DEL => {}
@@ -994,7 +1022,7 @@ impl VTPushParser {
         }
     }
 
-    // ---- SOS/PM/APC (ignored payload as per your machine)
+    // ---- SOS/PM/APC (ignored payload)
     fn on_spa_string<F: FnMut(VTEvent)>(&mut self, b: u8, _cb: &mut F) {
         match b {
             CAN | SUB => {
@@ -1081,5 +1109,625 @@ Csi(, '8', '34', '148', '', 't')
         "#
             .trim()
         );
+    }
+
+    #[test]
+    fn test_basic_escape_sequences() {
+        // Test basic ESC sequences
+        let result = decode_stream(b"\x1b[1;2;3d");
+        assert_eq!(result.trim(), "Csi(, '1', '2', '3', '', 'd')");
+
+        // Test ESC with intermediate
+        let result = decode_stream(b"\x1b  M");
+        assert_eq!(result.trim(), "Esc('  ', M)");
+
+        // Test SS3 (ESC O)
+        let result = decode_stream(b"\x1bOA");
+        assert_eq!(result.trim(), "Esc('', O)\nRaw('A')");
+    }
+
+    #[test]
+    fn test_csi_sequences() {
+        // Test CSI with private parameter
+        let result = decode_stream(b"\x1b[?25h");
+        assert_eq!(result.trim(), "Csi('?', '25', '', 'h')");
+
+        // Test CSI with multiple parameters
+        let result = decode_stream(b"\x1b[1;2;3;4;5m");
+        assert_eq!(result.trim(), "Csi(, '1', '2', '3', '4', '5', '', 'm')");
+
+        // Test CSI with colon parameter
+        let result = decode_stream(b"\x1b[3:1;2;3;4;5m");
+        assert_eq!(result.trim(), "Csi(, '3:1', '2', '3', '4', '5', '', 'm')");
+
+        // Test CSI with intermediate
+        let result = decode_stream(b"\x1b[  M");
+        assert_eq!(result.trim(), "Csi(, '  ', 'M')");
+    }
+
+    #[test]
+    fn test_dcs_sequences() {
+        // Test DCS with parameters
+        let result = decode_stream(b"\x1bP 1;2;3|test data\x1b\\");
+        assert_eq!(
+            result.trim(),
+            "DcsStart(, ' ', 1)\nDcsData(';2;3|test data')\nDcsEnd"
+        );
+
+        // Test DCS with private parameter
+        let result = decode_stream(b"\x1bP>1;2;3|more data\x1b\\");
+        assert_eq!(
+            result.trim(),
+            "DcsStart('>', '1', '2', '3', '', |)\nDcsData('more data')\nDcsEnd"
+        );
+
+        // Test DCS with intermediate
+        let result = decode_stream(b"\x1bP 1;2;3  |data\x1b\\");
+        assert_eq!(
+            result.trim(),
+            "DcsStart(, ' ', 1)\nDcsData(';2;3  |data')\nDcsEnd"
+        );
+    }
+
+    #[test]
+    fn test_osc_sequences() {
+        // Test OSC with BEL terminator
+        let result = decode_stream(b"\x1b]10;rgb:fff/000/000\x07");
+        assert_eq!(
+            result.trim(),
+            "OscStart\nOscData('10;rgb:fff/000/000')\nOscEnd"
+        );
+
+        // Test OSC with ST terminator
+        let result = decode_stream(b"\x1b]11;rgb:000/fff/000\x1b\\");
+        assert_eq!(
+            result.trim(),
+            "OscStart\nOscData('11;rgb:000/fff/000')\nOscEnd"
+        );
+
+        // Test OSC with escape in data
+        let result = decode_stream(b"\x1b]12;test [data\x1b\\");
+        assert_eq!(result.trim(), "OscStart\nOscData('12;test [data')\nOscEnd");
+    }
+
+    #[test]
+    fn test_cancellation_and_invalid_sequences() {
+        // Test CAN cancellation in CSI
+        let result = decode_stream(b"x\x1b[1;2;3\x18y");
+        assert_eq!(result.trim(), "Raw('x')\nRaw('y')");
+
+        // Test SUB cancellation in CSI
+        let result = decode_stream(b"x\x1b[1;2;3\x1ay");
+        assert_eq!(result.trim(), "Raw('x')\nRaw('y')");
+
+        // Test CAN cancellation in DCS (parser completes DCS then returns to ground)
+        let result = decode_stream(b"x\x1bP 1;2;3|data\x18y");
+        assert_eq!(
+            result.trim(),
+            "Raw('x')\nDcsStart(, ' ', 1)\nDcsCancel\nRaw('y')"
+        );
+
+        // Test SUB cancellation in OSC (parser emits OscStart then cancels)
+        let result = decode_stream(b"x\x1b]10;data\x1ay");
+        assert_eq!(result.trim(), "Raw('x')\nOscStart\nOscCancel\nRaw('y')");
+
+        // Test invalid CSI sequence (ignored)
+        let result = decode_stream(b"x\x1b[1;2;3gy");
+        assert_eq!(
+            result.trim(),
+            "Raw('x')\nCsi(, '1', '2', '3', '', 'g')\nRaw('y')"
+        );
+
+        // Test CSI ignore state
+        let result = decode_stream(b"x\x1b[:1;2;3gy");
+        assert_eq!(
+            result.trim(),
+            "Raw('x')\nCsi(, ':1', '2', '3', '', 'g')\nRaw('y')"
+        );
+    }
+
+    #[test]
+    fn test_escape_sequences_with_raw_text() {
+        // Test mixed raw text and escape sequences
+        let result = decode_stream(b"Hello\x1b[1;2;3dWorld");
+        assert_eq!(
+            result.trim(),
+            "Raw('Hello')\nCsi(, '1', '2', '3', '', 'd')\nRaw('World')"
+        );
+
+        // Test escape sequences with UTF-8 text
+        let result = decode_stream(b"\x1b[1;2;3d\xe4\xb8\xad\xe6\x96\x87");
+        assert_eq!(result.trim(), "Csi(, '1', '2', '3', '', 'd')\nRaw('中文')");
+    }
+
+    #[test]
+    fn test_c0_control_characters() {
+        // Test various C0 control characters
+        let result = decode_stream(b"\x0a\x0d\x09\x08\x0c\x0b");
+        assert_eq!(
+            result.trim(),
+            "C0(0a)\nC0(0d)\nC0(09)\nC0(08)\nC0(0c)\nC0(0b)"
+        );
+
+        // Test C0 with raw text
+        let result = decode_stream(b"Hello\x0aWorld");
+        assert_eq!(result.trim(), "Raw('Hello')\nC0(0a)\nRaw('World')");
+    }
+
+    #[test]
+    fn test_complex_escape_sequences() {
+        // Test complex CSI with all features
+        let result = decode_stream(&hex::decode("1b5b3f32353b313b323b333a343b353b363b373b383b393b31303b31313b31323b31333b31343b31353b31363b31373b31383b31393b32303b32313b32323b32333b32343b32353b32363b32373b32383b32393b33303b33313b33323b33333b33343b33353b33363b33373b33383b33393b34303b34313b34323b34333b34343b34353b34363b34373b34383b34393b35303b35313b35323b35333b35343b35353b35363b35373b35383b35393b36303b36313b36323b36333b36343b36353b36363b36373b36383b36393b37303b37313b37323b37333b37343b37353b37363b37373b37383b37393b38303b38313b38323b38333b38343b38353b38363b38373b38383b38393b39303b39313b39323b39333b39343b39353b39363b39373b39383b39393b3130306d").unwrap());
+        assert_eq!(
+            result.trim(),
+            "Csi('?', '25', '1', '2', '3:4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57', '58', '59', '60', '61', '62', '63', '64', '65', '66', '67', '68', '69', '70', '71', '72', '73', '74', '75', '76', '77', '78', '79', '80', '81', '82', '83', '84', '85', '86', '87', '88', '89', '90', '91', '92', '93', '94', '95', '96', '97', '98', '99', '100', '', 'm')"
+        );
+    }
+
+    #[test]
+    fn test_escape_sequences_with_del() {
+        // Test DEL character handling
+        let result = decode_stream(b"\x1b[1;2;3\x7fm");
+        assert_eq!(result.trim(), "Csi(, '1', '2', '3', '', 'm')");
+
+        // Test DEL in raw text
+        let result = decode_stream(b"Hello\x7fWorld");
+        assert_eq!(result.trim(), "Raw('HelloWorld')");
+    }
+
+    #[test]
+    fn test_escape_sequences_with_esc_esc() {
+        // Test ESC ESC sequence
+        let result = decode_stream(b"\x1b\x1b[1;2;3d");
+        assert_eq!(result.trim(), "Csi(, '1', '2', '3', '', 'd')");
+
+        let result = decode_stream(b"\x1bP 1;2;3|\x1b\x1bdata\x1b\\");
+        // Note: ESC ESC in DCS is handled correctly by the parser, escaping is done by the receiver
+        assert_eq!(
+            result.trim().replace("\x1b", "<ESC>"),
+            "DcsStart(, ' ', 1)\nDcsData(';2;3|<ESC>data')\nDcsEnd"
+        );
+    }
+
+    #[test]
+    fn test_sos_pm_apc_sequences() {
+        // Test SOS (ESC X)
+        let result = decode_stream(b"\x1bXtest data\x1b\\");
+        assert_eq!(result.trim(), "");
+
+        // Test PM (ESC ^)
+        let result = decode_stream(b"\x1b^test data\x1b\\");
+        assert_eq!(result.trim(), "");
+
+        // Test APC (ESC _)
+        let result = decode_stream(b"\x1b_test data\x1b\\");
+        assert_eq!(result.trim(), "");
+    }
+
+    #[test]
+    fn test_edge_cases() {
+        // Test empty input
+        let result = decode_stream(&[]);
+        assert_eq!(result.trim(), "");
+
+        // Test single ESC
+        let result = decode_stream(b"\x1b");
+        assert_eq!(result.trim(), "");
+
+        // Test incomplete CSI
+        let result = decode_stream(b"\x1b[");
+        assert_eq!(result.trim(), "");
+
+        // Test incomplete DCS
+        let result = decode_stream(b"\x1bP");
+        assert_eq!(result.trim(), "");
+
+        // Test incomplete OSC
+        let result = decode_stream(b"\x1b]");
+        assert_eq!(result.trim(), "OscStart");
+    }
+
+    #[test]
+    fn test_unicode_and_special_characters() {
+        // Test with Unicode characters
+        let result = decode_stream(b"\x1b[1;2;3d\xe4\xb8\xad\xe6\x96\x87");
+        assert_eq!(result.trim(), "Csi(, '1', '2', '3', '', 'd')\nRaw('中文')");
+
+        // Test with special ASCII characters
+        let result = decode_stream(b"\x1b[1;2;3d~!@#$%^&*()_+|\\{}[]:;\"|<>,.?/");
+        assert_eq!(
+            result.trim(),
+            "Csi(, '1', '2', '3', '', 'd')\nRaw('~!@#$%^&*()_+|\\{}[]:;\"|<>,.?/')"
+        );
+    }
+
+    #[test]
+    fn test_streaming_behavior() {
+        // Test streaming DCS data
+        let mut parser = VTPushParser::new().with_limits(1024, 4); // Small flush size
+        let mut result = String::new();
+        let mut callback = |vt_input: VTEvent<'_>| {
+            result.push_str(&format!("{:?}\n", vt_input));
+        };
+
+        // Feed DCS data in chunks
+        parser.feed_with(b"\x1bP 1;2;3|", &mut callback);
+        parser.feed_with(b"data", &mut callback);
+        parser.feed_with(b" more", &mut callback);
+        parser.feed_with(b"\x1b\\", &mut callback);
+
+        assert!(result.contains("DcsStart"));
+        assert!(result.contains("DcsData"));
+        assert!(result.contains("DcsEnd"));
+    }
+
+    #[test]
+    fn test_finish_method() {
+        let mut parser = VTPushParser::new();
+        let mut result = String::new();
+        let mut callback = |vt_input: VTEvent<'_>| {
+            result.push_str(&format!("{:?}\n", vt_input));
+        };
+
+        // Start an incomplete sequence
+        parser.feed_with(b"\x1b[1;2;3", &mut callback);
+
+        // Finish should flush any pending raw data
+        parser.finish(&mut callback);
+
+        assert_eq!(result.trim(), "");
+    }
+
+    #[test]
+    fn test_csi_colons() {
+        let test_cases: Vec<(&'static [u8], &[&str], u8)> = vec![
+            // 1. FG truecolor
+            (b"\x1b[38:2:255:128:64m", &["38:2:255:128:64"], b'm'),
+            // 2. BG truecolor
+            (b"\x1b[48:2:0:0:0m", &["48:2:0:0:0"], b'm'),
+            // 3. FG indexed
+            (b"\x1b[38:5:208m", &["38:5:208"], b'm'),
+            // 4. BG indexed
+            (b"\x1b[48:5:123m", &["48:5:123"], b'm'),
+            // 5. Bold + FG indexed + BG truecolor
+            (
+                b"\x1b[1;38:5:208;48:2:30:30:30m",
+                &["1", "38:5:208", "48:2:30:30:30"],
+                b'm',
+            ),
+            // 6. Reset + FG truecolor
+            (b"\x1b[0;38:2:12:34:56m", &["0", "38:2:12:34:56"], b'm'),
+            // 7. Underline color truecolor with empty subparam (::)
+            (b"\x1b[58:2::186:93:0m", &["58:2::186:93:0"], b'm'),
+            // 8. FG truecolor + BG indexed + underline color truecolor
+            (
+                b"\x1b[38:2:10:20:30;48:5:17;58:2::200:100:0m",
+                &["38:2:10:20:30", "48:5:17", "58:2::200:100:0"],
+                b'm',
+            ),
+            // 9. Colon params with leading zeros
+            (b"\x1b[38:2:000:007:042m", &["38:2:000:007:042"], b'm'),
+            // 10. Large RGB values
+            (b"\x1b[38:2:300:300:300m", &["38:2:300:300:300"], b'm'),
+            // 11. Trailing semicolon with colon param (empty final param)
+            (b"\x1b[38:5:15;m", &["38:5:15", ""], b'm'),
+            // 12. Only colon param (no numeric params)
+            (b"\x1b[38:2:1:2:3m", &["38:2:1:2:3"], b'm'),
+        ];
+
+        for (input, expected_params, expected_final) in test_cases {
+            let mut parser = VTPushParser::new();
+            parser.feed_with(input, |event| match event {
+                VTEvent::Csi {
+                    private,
+                    params,
+                    intermediates,
+                    final_byte,
+                } => {
+                    assert_eq!(
+                        private, None,
+                        "Expected no private prefix for input {:?}",
+                        input
+                    );
+                    assert_eq!(
+                        intermediates.is_empty(),
+                        true,
+                        "Expected no intermediates for input {:?}",
+                        input
+                    );
+                    assert_eq!(
+                        final_byte, expected_final,
+                        "Expected final byte '{}' for input {:?}",
+                        expected_final, input
+                    );
+
+                    let param_strings: Vec<String> = params
+                        .iter()
+                        .map(|p| String::from_utf8_lossy(p).to_string())
+                        .collect();
+                    assert_eq!(
+                        param_strings, expected_params,
+                        "Parameter mismatch for input {:?}",
+                        input
+                    );
+                }
+                _ => panic!("Expected CSI event for input {:?}, got {:?}", input, event),
+            });
+        }
+    }
+
+    #[test]
+    fn test_dcs_ignore_st_handling() {
+        // Test that DCS_IGNORE state doesn't handle ST (ESC \) as per spec
+        // This test documents the current behavior which differs from the specification
+
+        // Create a DCS sequence that goes into ignore state (using colon)
+        // ESC P : 1;2;3 | data ESC \
+        // The colon should put us in DCS_IGNORE, then ESC \ should transition to GROUND per spec
+        let result = decode_stream(b"Hello\x1bP:1;2;3|data\x1b\\World");
+
+        // Current implementation: DCS_IGNORE ignores ST, so we stay in ignore state
+        // and the sequence is never properly terminated
+        // Expected: Should transition to GROUND after ST, but current implementation doesn't
+        assert_eq!(result.trim(), "Raw('Hello')\nRaw('World')");
+
+        // Test with additional data after the ST to see if we're back in GROUND
+        let result = decode_stream(b"\x1bP:1;2;3|data\x1b\\Hello");
+
+        // This should show that we're not properly back in GROUND state
+        // because the ST wasn't handled in DCS_IGNORE
+        assert_eq!(result.trim(), "Raw('Hello')");
+
+        // Compare with a valid DCS sequence that doesn't go into ignore state
+        let result = decode_stream(b"\x1bP1;2;3|data\x1b\\Hello");
+        assert_eq!(
+            result.trim(),
+            "DcsStart(, '1', '2', '3', '', |)\nDcsData('data')\nDcsEnd\nRaw('Hello')"
+        );
+    }
+
+    #[test]
+    fn test_dcs_ignore_cancellation() {
+        // Test that CAN/SUB properly cancel DCS_IGNORE state
+        let result = decode_stream(b"\x1bP:1;2;3|data\x18Hello"); // CAN
+        assert_eq!(result.trim(), "Raw('Hello')");
+
+        let result = decode_stream(b"\x1bP:1;2;3|data\x1aHello"); // SUB
+        assert_eq!(result.trim(), "Raw('Hello')");
+    }
+
+    #[test]
+    fn test_dcs_payload_passthrough() {
+        // Test cases for DCS payload passthrough behavior
+        // Notes: body must be passed through verbatim.
+        // - ESC '\' (ST) ends the string.
+        // - ESC ESC stays as two bytes in the body.
+        // - ESC X (X!='\') is data: both ESC and the following byte are payload.
+        // - BEL (0x07) is data in DCS (not a terminator).
+
+        let dcs_cases: &[(&[u8], &str)] = &[
+            // 1) Minimal: embedded CSI SGR truecolor (colon params)
+            (b"\x1bPq\x1b[38:2:12:34:56m\x1b\\", "<ESC>[38:2:12:34:56m"),
+            // 2) Mixed payload: CSI + literal text
+            (b"\x1bPq\x1b[48:2:0:0:0m;xyz\x1b\\", "<ESC>[48:2:0:0:0m;xyz"),
+            // 3) DECRQSS-style reply payload (DCS 1$r ... ST) containing colon-CSI
+            (
+                b"\x1bP1$r\x1b[38:2:10:20:30;58:2::200:100:0m\x1b\\",
+                "<ESC>[38:2:10:20:30;58:2::200:100:0m",
+            ),
+            // 4) ESC ESC and ESC X inside body (all data)
+            (b"\x1bPqABC\x1b\x1bDEF\x1bXG\x1b\\", "ABC<ESC>DEF<ESC>XG"),
+            // 5) BEL in body (data, not a terminator)
+            (b"\x1bPqDATA\x07MORE\x1b\\", "DATA<BEL>MORE"),
+            // 6) iTerm2-style header (!|) with embedded CSI 256-color
+            (b"\x1bP!|\x1b[38:5:208m\x1b\\", "<ESC>[38:5:208m"),
+            // 7) Private prefix + final '|' (>|) with plain text payload
+            (b"\x1bP>|Hello world\x1b\\", "Hello world"),
+            // 8) Multiple embedded CSIs back-to-back
+            (
+                b"\x1bPq\x1b[38:2:1:2:3m\x1b[48:5:17m\x1b\\",
+                "<ESC>[38:2:1:2:3m<ESC>[48:5:17m",
+            ),
+            // 9) Long colon param with leading zeros
+            (
+                b"\x1bPq\x1b[58:2::000:007:042m\x1b\\",
+                "<ESC>[58:2::000:007:042m",
+            ),
+            // 10) Payload that includes a literal ST *text* sequence "ESC \"
+            //     (Note: inside DCS, this would actually TERMINATE; so to keep it as data we send "ESC ESC '\\"
+            (
+                b"\x1bPqKEEP \x1b\x1b\\ LITERAL ST\x1b\\",
+                "KEEP <ESC>\\ LITERAL ST",
+            ),
+        ];
+
+        for (input, expected_body) in dcs_cases {
+            let events = collect_events(input);
+
+            // Find DcsData events and concatenate their payloads
+            let mut actual_body = String::new();
+            for event in &events {
+                if let Some(data_part) = event
+                    .strip_prefix("DcsData('")
+                    .and_then(|s| s.strip_suffix("')"))
+                {
+                    actual_body
+                        .push_str(&data_part.replace("\x1b", "<ESC>").replace("\x07", "<BEL>"));
+                }
+            }
+
+            assert_eq!(
+                actual_body, *expected_body,
+                "DCS payload mismatch for input {:?}. Full events: {:#?}",
+                input, events
+            );
+
+            // Also verify we get proper DcsStart and DcsEnd events
+            assert!(
+                events.iter().any(|e| e.starts_with("DcsStart")),
+                "Missing DcsStart for input {:?}. Events: {:#?}",
+                input,
+                events
+            );
+            assert!(
+                events.iter().any(|e| e == "DcsEnd"),
+                "Missing DcsEnd for input {:?}. Events: {:#?}",
+                input,
+                events
+            );
+        }
+    }
+
+    fn collect_events(input: &[u8]) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut p = VTPushParser::new();
+        p.feed_with(input, |ev| out.push(format!("{:?}", ev)));
+        out
+    }
+
+    #[test]
+    fn dcs_header_with_colon_is_ignored_case1() {
+        // ESC P 1:2 q ... ST   -> colon inside header params (invalid)
+        let ev = collect_events(b"\x1bP1:2qHELLO\x1b\\");
+        // Expect: no DcsStart; the whole thing is ignored until ST
+        assert!(ev.iter().all(|e| !e.starts_with("DcsStart")), "{ev:#?}");
+    }
+
+    #[test]
+    fn dcs_header_with_colon_is_ignored_case2() {
+        // Colon immediately after ESC P, before any digit
+        let ev = collect_events(b"\x1bP:1qDATA\x1b\\");
+        assert!(ev.iter().all(|e| !e.starts_with("DcsStart")), "{ev:#?}");
+    }
+
+    #[test]
+    fn dcs_header_with_colon_is_ignored_case3() {
+        // Mixed: digits;colon;digits then intermediates/final
+        let ev = collect_events(b"\x1bP12:34!qPAYLOAD\x1b\\");
+        assert!(ev.iter().all(|e| !e.starts_with("DcsStart")), "{ev:#?}");
+    }
+
+    #[test]
+    fn osc_aborted_by_can_mid_body() {
+        // ESC ] 0;Title <CAN> more <BEL>
+        let mut s = Vec::new();
+        s.extend_from_slice(b"\x1b]0;Title");
+        s.push(CAN);
+        s.extend_from_slice(b"more\x07");
+
+        let ev = collect_debug(&s);
+
+        // EXPECT_SPEC_STRICT: no events at all (no Start/Data/End)
+        // assert!(ev.is_empty(), "{ev:#?}");
+
+        // EXPECT_PUSH_PARSER: Start emitted, but NO Data, NO End
+        assert!(ev.iter().any(|e| e.starts_with("OscStart")), "{ev:#?}");
+        assert!(!ev.iter().any(|e| e.starts_with("OscData")), "{ev:#?}");
+        assert!(!ev.iter().any(|e| e.starts_with("OscEnd")), "{ev:#?}");
+    }
+
+    #[test]
+    fn osc_aborted_by_sub_before_terminator() {
+        let mut s = Vec::new();
+        s.extend_from_slice(b"\x1b]52;c;YWJjZA==");
+        s.push(SUB); // abort
+        s.extend_from_slice(b"\x1b\\"); // would have been ST, but must be ignored after abort
+
+        let ev = collect_debug(&s);
+        // SPEC-STRICT:
+        // assert!(ev.is_empty(), "{ev:#?}");
+        // PUSH-PARSER:
+        assert!(ev.iter().any(|e| e.starts_with("OscStart")), "{ev:#?}");
+        assert!(!ev.iter().any(|e| e.starts_with("OscData")), "{ev:#?}");
+        assert!(!ev.iter().any(|e| e.starts_with("OscEnd")), "{ev:#?}");
+    }
+
+    /// Collect raw VTEvent debug lines for quick assertions.
+    fn collect_debug(input: &[u8]) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut p = VTPushParser::new();
+        p.feed_with(input, |ev| out.push(format!("{:?}", ev)));
+        out
+    }
+
+    const CAN: u8 = 0x18;
+    const SUB: u8 = 0x1A;
+
+    #[test]
+    fn dcs_aborted_by_can_before_body() {
+        // ESC P q <CAN> ... ST
+        let mut s = Vec::new();
+        s.extend_from_slice(b"\x1bPq"); // header (valid: final 'q')
+        s.push(CAN);
+        s.extend_from_slice(b"IGNORED\x1b\\"); // should be raw
+
+        let ev = collect_debug(&s);
+
+        assert_eq!(ev.len(), 4, "{ev:#?}");
+        assert_eq!(ev[0], "DcsStart(, '', q)");
+        assert_eq!(ev[1], "DcsCancel");
+        assert_eq!(ev[2], "Raw('IGNORED')");
+        assert_eq!(ev[3], "Esc('', \\)");
+    }
+
+    #[test]
+    fn dcs_aborted_by_can_mid_body() {
+        // ESC P q ABC <CAN> more ST
+        let mut s = Vec::new();
+        s.extend_from_slice(b"\x1bPqABC");
+        s.push(CAN);
+        s.extend_from_slice(b"MORE\x1b\\"); // ignored after abort
+
+        let ev = collect_debug(&s);
+
+        assert_eq!(ev.len(), 4, "{ev:#?}");
+        assert_eq!(ev[0], "DcsStart(, '', q)");
+        assert_eq!(ev[1], "DcsCancel");
+        assert_eq!(ev[2], "Raw('MORE')");
+        assert_eq!(ev[3], "Esc('', \\)");
+    }
+
+    /* ========= SOS / PM / APC (ESC X, ESC ^, ESC _) ========= */
+
+    #[test]
+    fn spa_aborted_by_can_is_ignored() {
+        // ESC _ data <CAN> more ST
+        let mut s = Vec::new();
+        s.extend_from_slice(b"\x1b_hello");
+        s.push(CAN);
+        s.extend_from_slice(b"world\x1b\\");
+
+        let ev = collect_debug(&s);
+        assert_eq!(ev.len(), 2, "{ev:#?}");
+        assert_eq!(ev[0], "Raw('world')");
+        assert_eq!(ev[1], "Esc('', \\)");
+    }
+
+    #[test]
+    fn spa_sub_aborts_too() {
+        let mut s = Vec::new();
+        s.extend_from_slice(b"\x1bXhello");
+        s.push(SUB);
+        s.extend_from_slice(b"world\x1b\\");
+        let ev = collect_debug(&s);
+        assert_eq!(ev.len(), 2, "{ev:#?}");
+        assert_eq!(ev[0], "Raw('world')");
+        assert_eq!(ev[1], "Esc('', \\)");
+    }
+
+    /* ========= Sanity: CAN outside strings is a C0 EXECUTE ========= */
+
+    #[test]
+    fn can_in_ground_is_c0() {
+        let mut s = Vec::new();
+        s.extend_from_slice(b"abc");
+        s.push(CAN);
+        s.extend_from_slice(b"def");
+        let ev = collect_debug(&s);
+        // Expect Raw("abc"), C0(0x18), Raw("def")
+        assert_eq!(ev.len(), 3, "{ev:#?}");
+        assert_eq!(ev[0], "Raw('abc')");
+        assert_eq!(ev[1], "C0(18)");
+        assert_eq!(ev[2], "Raw('def')");
     }
 }

@@ -1,0 +1,185 @@
+MACHINE VT_DEC
+
+ACTIONS:
+  PRINT(ch)
+  EXECUTE(ctrl)
+  ESC_DISPATCH(final, ints)
+  CSI_DISPATCH(final, params, ints, priv)
+  DCS_HOOK(params, ints, priv)            # enter DCS passthrough
+  DCS_PUT(byte)                           # feed DCS data byte
+  DCS_UNHOOK()                            # leave DCS passthrough
+  OSC_DISPATCH(data)
+  CLEAR()                                 # clear collectors (params, ints, priv, data)
+  COLLECT_INT(ch)
+  COLLECT_PARAM(d)                        # decimal digit
+  NEXT_PARAM()
+  SET_PRIV(ch)                            # '<', '=', '>', '?'
+
+BYTES:
+  C0 = 0x00–0x1F
+  DEL = 0x7F
+  ESC = 0x1B
+  ST  = ESC '\'                           # String Terminator
+  BEL = 0x07
+  DIGIT = '0'..'9'
+  SEP = ';'
+  COLON = ':'
+  SP = 0x20
+  INTERMEDIATE = 0x20–0x2F
+  FINAL = 0x30–0x7E                       # NOTE: includes '0'..'9'
+  PRIV = '<' | '=' | '>' | '?'
+
+# -------------------------
+# Top-level text processing
+# -------------------------
+
+STATE GROUND:
+  C0 (except ESC)    -> EXECUTE(byte), stay
+  DEL                -> ignore, stay
+  ESC                -> CLEAR(), goto ESCAPE
+  0x20–0x7E          -> PRINT(byte), stay
+
+# -------------------------
+# ESC family
+# -------------------------
+
+STATE ESCAPE:
+  CAN(0x18) or SUB(0x1A) -> goto GROUND
+  DEL                -> ignore, stay
+  INTERMEDIATE       -> COLLECT_INT(byte), goto ESC_INT
+  '['                -> CLEAR(), goto CSI_ENTRY
+  'P'                -> CLEAR(), goto DCS_ENTRY
+  ']'                -> CLEAR(), goto OSC_STRING
+  'X' | '^' | '_'    -> CLEAR(), goto SOS_PM_APC_STRING
+  FINAL              -> ESC_DISPATCH(byte, ints), goto GROUND
+  ESC                -> stay ESCAPE          # ESC ESC allowed
+
+STATE ESC_INT:
+  CAN or SUB         -> goto GROUND
+  DEL                -> ignore, stay
+  INTERMEDIATE       -> COLLECT_INT(byte), stay
+  FINAL              -> ESC_DISPATCH(byte, ints), goto GROUND
+  otherwise          -> goto GROUND          # invalid -> recover
+
+# -------------------------
+# CSI family (parameters/intermediates/final)
+# -------------------------
+
+STATE CSI_ENTRY:
+  CAN or SUB         -> goto GROUND
+  DEL                -> ignore, stay
+  ESC                -> goto ESCAPE
+  PRIV               -> SET_PRIV(byte), goto CSI_PARAM
+  DIGIT              -> COLLECT_PARAM(digit), goto CSI_PARAM
+  SEP                -> NEXT_PARAM(), goto CSI_PARAM
+  COLON              -> COLLECT_PARAM(':'), goto CSI_PARAM   # keep sub-params
+  SP..'/'            -> COLLECT_INT(byte), goto CSI_INT
+  FINAL              -> CSI_DISPATCH(byte, [], ints, priv), goto GROUND
+
+STATE CSI_PARAM:
+  CAN or SUB         -> goto GROUND
+  DEL                -> ignore, stay
+  ESC                -> goto ESCAPE
+  DIGIT              -> COLLECT_PARAM(digit), stay
+  SEP                -> NEXT_PARAM(), stay
+  COLON              -> COLLECT_PARAM(':'), stay
+  SP..'/'            -> COLLECT_INT(byte), goto CSI_INT
+  FINAL              -> CSI_DISPATCH(byte, params, ints, priv), goto GROUND
+
+STATE CSI_INT:
+  CAN or SUB         -> goto GROUND
+  DEL                -> ignore, stay
+  ESC                -> goto ESCAPE
+  SP..'/'            -> COLLECT_INT(byte), stay
+  FINAL              -> CSI_DISPATCH(byte, params, ints, priv), goto GROUND
+  otherwise          -> goto CSI_IGNORE
+
+STATE CSI_IGNORE:
+  CAN or SUB         -> goto GROUND
+  DEL                -> ignore, stay
+  ESC                -> goto ESCAPE
+  FINAL              -> goto GROUND
+  otherwise          -> stay CSI_IGNORE
+
+# -------------------------
+# DCS (hook/put/unhook; body is passthrough)
+# -------------------------
+
+STATE DCS_ENTRY:
+  CAN or SUB         -> goto GROUND
+  DEL                -> ignore, stay
+  ESC                -> goto ESCAPE
+  PRIV               -> SET_PRIV(byte), goto DCS_PARAM
+  DIGIT              -> COLLECT_PARAM(digit), goto DCS_PARAM
+  SEP                -> NEXT_PARAM(), goto DCS_PARAM
+  COLON              -> goto DCS_IGNORE
+  SP..'/'            -> COLLECT_INT(byte), goto DCS_INT
+  FINAL              -> DCS_HOOK(params, ints, priv), goto DCS_PASSTHROUGH
+
+STATE DCS_PARAM:
+  CAN or SUB         -> goto GROUND
+  DEL                -> ignore, stay
+  ESC                -> goto ESCAPE
+  DIGIT              -> COLLECT_PARAM(digit), stay
+  SEP                -> NEXT_PARAM(), stay
+  COLON              -> goto DCS_IGNORE
+  SP..'/'            -> COLLECT_INT(byte), goto DCS_INT
+  FINAL              -> DCS_HOOK(params, ints, priv), goto DCS_PASSTHROUGH
+
+STATE DCS_INT:
+  CAN or SUB         -> goto GROUND
+  DEL                -> ignore, stay
+  ESC                -> goto ESCAPE
+  SP..'/'            -> COLLECT_INT(byte), stay
+  FINAL              -> DCS_HOOK(params, ints, priv), goto DCS_PASSTHROUGH
+  otherwise          -> goto DCS_IGNORE
+
+STATE DCS_IGNORE:
+  CAN or SUB         -> goto GROUND
+  DEL                -> ignore, stay
+  ESC                -> goto ESCAPE
+  ST                 -> goto GROUND
+  otherwise          -> stay DCS_IGNORE
+
+STATE DCS_PASSTHROUGH:
+  CAN or SUB         -> DCS_UNHOOK(), goto GROUND
+  DEL                -> ignore, stay
+  ESC                -> goto DCS_ESC
+  0x00–0x7E (incl SP and BEL) -> DCS_PUT(byte), stay
+
+STATE DCS_ESC:
+  '\' (ST)           -> DCS_UNHOOK(), goto GROUND
+  ESC                -> DCS_PUT(ESC), stay DCS_ESC           # ESC-ESC literal
+  otherwise          -> DCS_PUT(ESC), DCS_PUT(byte), goto DCS_PASSTHROUGH
+
+# -------------------------
+# OSC (BEL or ST terminate)
+# -------------------------
+
+STATE OSC_STRING:
+  CAN or SUB         -> goto GROUND
+  DEL                -> ignore, stay
+  BEL                -> OSC_DISPATCH(data), goto GROUND
+  ESC                -> goto OSC_ESC
+  0x20–0x7E          -> append to data, stay
+  0x00–0x1F(except BEL) -> ignore, stay
+
+STATE OSC_ESC:
+  '\' (ST)           -> OSC_DISPATCH(data), goto GROUND
+  ESC                -> append ESC to data, stay OSC_ESC
+  otherwise          -> append ESC + byte, goto OSC_STRING
+
+# -------------------------
+# SOS/PM/APC strings (ESC X, ESC ^, ESC _)
+# -------------------------
+
+STATE SOS_PM_APC_STRING:
+  CAN or SUB         -> goto GROUND
+  DEL                -> ignore, stay
+  ESC                -> goto SPA_ESC
+  0x00–0x7E          -> append to data, stay
+
+STATE SPA_ESC:
+  '\' (ST)           -> /* ignore collected */ goto GROUND
+  ESC                -> append ESC to data, stay SPA_ESC
+  otherwise          -> append ESC + byte, goto SOS_PM_APC_STRING
