@@ -1,0 +1,107 @@
+# A very large CSI escape
+<ESC>[?25;1;2;3:4;5;6;7;8;9;10;11;12;13;14;15;16;17;18;19;20;21;22;23;24;25;26;27;28;29;30;31;32;33;34;35;36;37;38;39;40;41;42;43;44;45;46;47;48;49;50;51;52;53;54;55;56;57;58;59;60;61;62;63;64;65;66;67;68;69;70;71;72;73;74;75;76;77;78;79;80;81;82;83;84;85;86;87;88;89;90;91;92;93;94;95;96;97;98;99;100m
+
+# Captured from iTerm2
+<ESC>[ITERM2 3.5.14n<ESC>]10;rgb:dcaa/dcab/dcaa<ESC>\<ESC>]11;rgb:158e/193a/1e75<ESC>\<ESC>[?64;1;2;4;6;17;18;21;22c<ESC>[>64;2500;0c<ESC>P!|6954726D<ESC>\<ESC>P>|iTerm2 3.5.14<ESC>\<ESC>[8;34;148t
+
+# No escapes, just control chars
+<LF><CR><TAB><BS><FF><VT>
+
+# Raw text with line feed control character
+Hello<LF>World
+# Raw text with delete character (should be ignored)
+Hello<DEL>World
+
+# CSI: Cursor down with parameters 1,2,3
+<ESC>[1;2;3d
+# CSI: Show cursor (private parameter ?25, final h)
+<ESC>[?25h
+# CSI: Set graphics mode with multiple parameters (1,2,3,4,5, final m)
+<ESC>[1;2;3;4;5m
+# CSI: Set graphics mode with colon parameter (3:1,2,3,4,5, final m)
+<ESC>[3:1;2;3;4;5m
+# CSI: Cursor up with intermediate space character (final M)
+<ESC>[  M
+
+# OSC: Set foreground color to red (10;rgb:fff/000/000) terminated by BEL
+<ESC>]10;rgb:fff/000/000<BEL>
+# OSC: Set background color to green (11;rgb:000/fff/000) terminated by ST
+<ESC>]11;rgb:000/fff/000<ESC>\
+# OSC: Set text color (12;test [data) terminated by ST
+<ESC>]12;test [data<ESC>\
+# DCS: Device control string with parameters (1,2,3) and payload terminated by ST
+<ESC>P 1;2;3|test data<ESC>\
+# DCS: Device control string with private parameter > and payload terminated by ST
+<ESC>P>1;2;3|more data<ESC>\
+# DCS: Device control string with intermediate space and payload terminated by ST
+<ESC>P 1;2;3  |data<ESC>\
+# DCS: Device control string with final r and payload terminated by ST
+<ESC>P1$r<ESC>\
+# ESC: Escape sequence with intermediate space and final M
+<ESC>  M
+# SS3: Single shift 3 with final A (arrow key)
+<ESC>OA
+
+# DCS: Device control string with colon parameter (invalid/DCS_IGNORE) cancelled by CAN
+<ESC>P:1;2;3|data<CAN>Hello
+# DCS: Device control string with colon parameter (invalid/DCS_IGNORE) cancelled by SUB
+<ESC>P:1;2;3|data<SUB>Hello
+
+# SOS: Start of string (ESC X) with payload terminated by ST
+<ESC>Xtest data<ESC>\
+# PM: Privacy message (ESC ^) with payload terminated by ST
+<ESC>^test data<ESC>\
+# APC: Application program command (ESC _) with payload terminated by ST
+<ESC>_test data<ESC>\
+
+# CSI: Cursor down sequence cancelled by CAN
+x<ESC>[1;2;3<CAN>y
+# CSI: Cursor down sequence cancelled by SUB
+x<ESC>[1;2;3<SUB>y
+# DCS: Device control string cancelled by CAN
+x<ESC>P 1;2;3|data<CAN>y
+# OSC: Operating system command cancelled by SUB
+x<ESC>]10;data<SUB>y
+
+# CSI: Invalid final byte g (should be ignored)
+x<ESC>[1;2;3gy
+# CSI: Invalid colon parameter (should be ignored)
+x<ESC>[:1;2;3gy
+
+# ESC ESC: Double escape followed by CSI cursor down
+<ESC><ESC>[1;2;3d
+# DCS: Device control string with escaped ESC in payload
+<ESC>P 1;2;3|<ESC><ESC>data<ESC>\
+# CSI: Graphics mode with DEL character in parameters
+<ESC>[1;2;3<DEL>m
+
+# DCS: Device control string with colon parameter (invalid) in text context
+Hello<ESC>P:1;2;3|data<ESC>\World
+# DCS: Device control string with colon parameter (invalid) in text context
+<ESC>P:1;2;3|data<ESC>\Hello
+# DCS: Valid device control string in text context
+<ESC>P1;2;3|data<ESC>\Hello
+# CSI: FG truecolor
+<ESC>[38:2:255:128:64m
+# CSI: BG truecolor
+<ESC>[48:2:0:0:0m
+# CSI: FG indexed
+<ESC>[38:5:208m
+# CSI: BG indexed
+<ESC>[48:5:123m
+# CSI: Bold + FG indexed + BG truecolor
+<ESC>[1;38:5:208;48:2:30:30:30m
+# CSI: Reset + FG truecolor
+<ESC>[0;38:2:12:34:56m
+# CSI: Underline color truecolor with empty subparam (::)
+<ESC>[58:2::186:93:0m
+# CSI: FG truecolor + BG indexed + underline color truecolor
+<ESC>[38:2:10:20:30;48:5:17;58:2::200:100:0m
+# CSI: Colon params with leading zeros
+<ESC>[38:2:000:007:042m
+# CSI: Large RGB values
+<ESC>[38:2:300:300:300m
+# CSI: Trailing semicolon with colon param (empty final param)
+<ESC>[38:5:15;m
+# CSI: Only colon param (no numeric params)
+<ESC>[38:2:1:2:3m

@@ -1,369 +1,133 @@
-use std::ops::Range;
+pub mod event;
+pub mod signature;
 
 use smallvec::SmallVec;
 
-const ESC: u8 = 0x1B;
-const BEL: u8 = 0x07;
-const DEL: u8 = 0x7F;
-const CAN: u8 = 0x18;
-const SUB: u8 = 0x1A;
+const ESC: u8 = AsciiControl::Esc as _;
+const BEL: u8 = AsciiControl::Bel as _;
+const DEL: u8 = AsciiControl::Del as _;
+const CAN: u8 = AsciiControl::Can as _;
+const SUB: u8 = AsciiControl::Sub as _;
 const CSI: u8 = b'[';
 const OSC: u8 = b']';
 const SS3: u8 = b'O';
 const DCS: u8 = b'P';
 const ST_FINAL: u8 = b'\\';
 
-#[derive(Default, Clone, Copy, PartialEq, Eq)]
-pub struct VTIntermediate {
-    data: [u8; 2],
-}
-
-impl VTIntermediate {
-    pub const fn empty() -> Self {
-        Self { data: [0, 0] }
-    }
-
-    pub const fn one(c: u8) -> Self {
-        assert!(c >= 0x20 && c <= 0x2F);
-        Self { data: [c, 0] }
-    }
-
-    pub const fn two(c1: u8, c2: u8) -> Self {
-        assert!(c1 >= 0x20 && c1 <= 0x2F);
-        assert!(c2 >= 0x20 && c2 <= 0x2F);
-        Self { data: [c1, c2] }
-    }
-
-    pub fn has(&self, c: u8) -> bool {
-        self.data[0] == c || self.data[1] == c
-    }
-
-    pub fn clear(&mut self) {
-        self.data[0] = 0;
-        self.data[1] = 0;
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.data[0] == 0 && self.data[1] == 0
-    }
-
-    pub fn len(&self) -> usize {
-        self.data.iter().filter(|&&c| c != 0).count()
-    }
-
-    #[must_use]
-    pub fn push(&mut self, c: u8) -> bool {
-        if c < 0x20 || c > 0x2F {
-            return false;
+macro_rules! ascii_control {
+    ($(($variant:ident, $value:expr)),* $(,)?) => {
+        /// ASCII control codes.
+        #[repr(u8)]
+        pub enum AsciiControl {
+            $( $variant = $value, )*
         }
 
-        if self.data[0] == 0 {
-            self.data[0] = c;
-            true
-        } else if self.data[1] == 0 {
-            self.data[1] = c;
-            true
-        } else {
-            false
-        }
-    }
-
-    const fn const_eq(&self, other: &Self) -> bool {
-        self.data[0] == other.data[0] && self.data[1] == other.data[1]
-    }
-}
-
-impl std::fmt::Debug for VTIntermediate {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Inefficient
-        write!(f, "'")?;
-        for c in self.data.iter() {
-            if *c == 0 {
-                break;
+        impl std::fmt::Display for AsciiControl {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match self {
+                    $( AsciiControl::$variant => write!(f, "<{}>", stringify!($variant).to_ascii_uppercase()), )*
+                }
             }
-            write!(f, "{}", *c as char)?;
         }
-        write!(f, "'")?;
-        Ok(())
-    }
-}
 
-/// A signature for an escape sequence.
-pub struct VTEscapeSignature {
-    pub prefix: u8,
-    pub private: Option<u8>,
-    pub intermediates: VTIntermediate,
-    pub final_byte: u8,
-    pub param_count: Range<u8>,
-}
-
-impl VTEscapeSignature {
-    pub const fn csi(
-        private: Option<u8>,
-        param_count: Range<u8>,
-        intermediates: VTIntermediate,
-        final_byte: u8,
-    ) -> Self {
-        Self {
-            prefix: CSI,
-            private,
-            intermediates,
-            final_byte,
-            param_count,
-        }
-    }
-
-    pub const fn ss3(intermediates: VTIntermediate, final_byte: u8) -> Self {
-        Self {
-            prefix: SS3,
-            private: None,
-            intermediates,
-            final_byte,
-            param_count: u8::MIN..u8::MAX,
-        }
-    }
-
-    pub const fn dcs(
-        priv_prefix: Option<u8>,
-        param_count: Range<u8>,
-        intermediates: VTIntermediate,
-        final_byte: u8,
-    ) -> Self {
-        Self {
-            prefix: DCS,
-            private: priv_prefix,
-            intermediates,
-            final_byte,
-            param_count,
-        }
-    }
-
-    pub const fn osc(intermediates: VTIntermediate, final_byte: u8) -> Self {
-        Self {
-            prefix: OSC,
-            private: None,
-            intermediates,
-            final_byte,
-            param_count: u8::MIN..u8::MAX,
-        }
-    }
-
-    pub fn matches(&self, entry: &VTEvent) -> bool {
-        // TODO: const
-        match entry {
-            VTEvent::Esc {
-                intermediates,
-                final_byte,
-            } => self.final_byte == *final_byte && self.intermediates.const_eq(intermediates),
-            VTEvent::Csi {
-                private,
-                params,
-                intermediates,
-                final_byte,
-            } => {
-                self.prefix == CSI
-                    && self.final_byte == *final_byte
-                    && self.intermediates.const_eq(intermediates)
-                    && self.const_private_eq(private)
-                    && self.const_contains(params.len())
+        impl std::fmt::Debug for AsciiControl {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match self {
+                    $( AsciiControl::$variant => write!(f, "<{}>", stringify!($variant).to_ascii_uppercase()), )*
+                }
             }
-            VTEvent::Ss3 {
-                intermediates,
-                final_byte,
-            } => {
-                self.prefix == SS3
-                    && self.final_byte == *final_byte
-                    && self.intermediates.const_eq(intermediates)
-            }
-            VTEvent::DcsStart {
-                priv_prefix,
-                params,
-                intermediates,
-                final_byte,
-            } => {
-                self.prefix == DCS
-                    && self.final_byte == *final_byte
-                    && self.intermediates.const_eq(intermediates)
-                    && self.private == *priv_prefix
-                    && self.const_contains(params.len())
-            }
-            _ => false,
         }
-    }
 
-    const fn const_private_eq(&self, other: &Option<u8>) -> bool {
-        match (self.private, other) {
-            (Some(a), Some(b)) => a == *b,
-            (None, None) => true,
-            _ => false,
-        }
-    }
-
-    fn const_contains(&self, len: usize) -> bool {
-        // TODO: const
-        self.param_count.contains(&(len as u8))
-    }
-}
-
-pub enum VTEvent<'a> {
-    // Plain printable text from GROUND (coalesced)
-    Raw(&'a [u8]),
-
-    // C0 control (EXECUTE)
-    C0(u8),
-
-    // ESC final (with intermediates)
-    Esc {
-        intermediates: VTIntermediate,
-        final_byte: u8,
-    },
-
-    // CSI short escape
-    Csi {
-        private: Option<u8>,
-        params: smallvec::SmallVec<[&'a [u8]; 4]>,
-        intermediates: VTIntermediate,
-        final_byte: u8,
-    },
-
-    // SS3 (ESC O …)
-    Ss3 {
-        intermediates: VTIntermediate,
-        final_byte: u8,
-    },
-
-    // DCS stream
-    DcsStart {
-        priv_prefix: Option<u8>,
-        params: smallvec::SmallVec<[&'a [u8]; 4]>,
-        intermediates: VTIntermediate,
-        final_byte: u8,
-    },
-    DcsData(&'a [u8]),
-    DcsEnd,
-    DcsCancel,
-
-    // OSC stream
-    OscStart,
-    OscData(&'a [u8]),
-    OscEnd {
-        used_bel: bool,
-    },
-    OscCancel,
-}
-
-impl<'a> std::fmt::Debug for VTEvent<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            VTEvent::Raw(s) => {
-                write!(f, "Raw('")?;
-                for chunk in s.utf8_chunks() {
-                    write!(f, "{}", chunk.valid())?;
-                    if !chunk.invalid().is_empty() {
-                        write!(f, "<{}>", hex::encode(chunk.invalid()))?;
+        impl TryFrom<u8> for AsciiControl {
+            type Error = ();
+            fn try_from(value: u8) -> Result<Self, Self::Error> {
+                $(
+                    if value == $value {
+                        return Ok(AsciiControl::$variant);
                     }
-                }
-                write!(f, "')")?;
-                Ok(())
+                )*
+                Err(())
             }
-            VTEvent::C0(b) => write!(f, "C0({:02x})", b),
-            VTEvent::Esc {
-                intermediates,
-                final_byte,
-            } => {
-                write!(f, "Esc({:?}", intermediates)?;
-                write!(f, ", {})", *final_byte as char)?;
-                Ok(())
-            }
-            VTEvent::Csi {
-                private,
-                params,
-                intermediates,
-                final_byte,
-            } => {
-                write!(f, "Csi(")?;
-                if let Some(p) = private {
-                    write!(f, "{:?}", *p as char)?;
-                }
-                for param in params {
-                    write!(f, ", '")?;
-                    for chunk in param.utf8_chunks() {
-                        write!(f, "{}", chunk.valid())?;
-                        if !chunk.invalid().is_empty() {
-                            write!(f, "<{}>", hex::encode(chunk.invalid()))?;
-                        }
-                    }
-                    write!(f, "'")?;
-                }
-                write!(f, ", {:?}", intermediates)?;
-                write!(f, ", {:?})", *final_byte as char)?;
-                Ok(())
-            }
-            VTEvent::Ss3 {
-                intermediates,
-                final_byte,
-            } => {
-                write!(f, "Ss3(")?;
-                write!(f, "{:?}", intermediates)?;
-                write!(f, ", {})", *final_byte as char)?;
-                Ok(())
-            }
-            VTEvent::DcsStart {
-                priv_prefix,
-                params,
-                intermediates,
-                final_byte,
-            } => {
-                write!(f, "DcsStart(")?;
-                if let Some(p) = priv_prefix {
-                    write!(f, "{:?}", *p as char)?;
-                }
-                for param in params {
-                    write!(f, ", '")?;
-                    for chunk in param.utf8_chunks() {
-                        write!(f, "{}", chunk.valid())?;
-                        if !chunk.invalid().is_empty() {
-                            write!(f, "<{}>", hex::encode(chunk.invalid()))?;
-                        }
-                    }
-                    write!(f, "'")?;
-                }
-                write!(f, ", {:?}", intermediates)?;
-                write!(f, ", {})", *final_byte as char)?;
-                Ok(())
-            }
-            VTEvent::DcsData(s) => {
-                write!(f, "DcsData('")?;
-                for chunk in s.utf8_chunks() {
-                    write!(f, "{}", chunk.valid())?;
-                    if !chunk.invalid().is_empty() {
-                        write!(f, "<{}>", hex::encode(chunk.invalid()))?;
-                    }
-                }
-                write!(f, "')")?;
-                Ok(())
-            }
-            VTEvent::DcsEnd => write!(f, "DcsEnd"),
-            VTEvent::DcsCancel => write!(f, "DcsCancel"),
-            VTEvent::OscStart => write!(f, "OscStart"),
-            VTEvent::OscData(s) => {
-                write!(f, "OscData('")?;
-                for chunk in s.utf8_chunks() {
-                    write!(f, "{}", chunk.valid())?;
-                    if !chunk.invalid().is_empty() {
-                        write!(f, "<{}>", hex::encode(chunk.invalid()))?;
-                    }
-                }
-                write!(f, "')")?;
-                Ok(())
-            }
-            VTEvent::OscEnd { .. } => {
-                write!(f, "OscEnd")?;
-                Ok(())
-            }
-            VTEvent::OscCancel => write!(f, "OscCancel"),
         }
-    }
+
+        impl TryFrom<char> for AsciiControl {
+            type Error = ();
+            fn try_from(value: char) -> Result<Self, Self::Error> {
+                $(
+                    if value == char::from($value) {
+                        return Ok(AsciiControl::$variant);
+                    }
+                )*
+                Err(())
+            }
+        }
+
+        impl std::str::FromStr for AsciiControl {
+            type Err = ();
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                $(
+                    if s.eq_ignore_ascii_case(stringify!($name)) {
+                        return Ok(AsciiControl::$variant);
+                    }
+                )*
+                Err(())
+            }
+        }
+    };
+}
+
+ascii_control! {
+    (Nul, 0),
+    (Soh, 1),
+    (Stx, 2),
+    (Etx, 3),
+    (Eot, 4),
+    (Enq, 5),
+    (Ack, 6),
+    (Bel, 7),
+    (Bs, 8),
+    (Tab, 9),
+    (Lf, 10),
+    (Vt, 11),
+    (Ff, 12),
+    (Cr, 13),
+    (So, 14 ),
+    (Si, 15),
+    (Dle, 16),
+    (Dc1, 17),
+    (Dc2, 18),
+    (Dc3, 19),
+    (Dc4, 20),
+    (Nak, 21),
+    (Syn, 22),
+    (Etb, 23),
+    (Can, 24),
+    (Em, 25),
+    (Sub, 26),
+    (Esc, 27),
+    (Fs, 28),
+    (Gs, 29),
+    (Rs, 30),
+    (Us, 31),
+    (Del, 127),
+}
+
+// Re-export the main types for backward compatibility
+pub use event::{VTEvent, VTIntermediate};
+pub use signature::VTEscapeSignature;
+
+/// The action to take with the most recently accumulated byte.
+pub enum VTAction<'a> {
+    /// The parser will accumulate the byte and continue processing.
+    None,
+    /// The parser emitted an event.
+    Event(VTEvent<'a>),
+    /// Emit this byte as a ground-state character.
+    Ground,
+    /// Emit this byte into the current DCS stream.
+    Dcs,
+    /// Emit this byte into the current OSC stream.
+    Osc,
 }
 
 #[inline]
@@ -446,6 +210,16 @@ impl VTPushParser {
             used_bel: false,
             stream_flush: 8192,
         }
+    }
+
+    /// Decode a buffer of bytes into a series of events.
+    pub fn decode_buffer<'a>(input: &'a [u8], mut cb: impl for<'b> FnMut(VTEvent<'b>)) {
+        let mut parser = Self::new();
+        for &b in input {
+            parser.push_with(b, &mut cb);
+        }
+        parser.flush_raw_if_any(&mut cb);
+        parser.finish(&mut cb);
     }
 
     pub fn with_stream_flush_max(mut self, stream_flush: usize) -> Self {
@@ -1049,296 +823,38 @@ impl VTPushParser {
 
 #[cfg(test)]
 mod tests {
+    use std::{fs::OpenOptions, sync::Mutex};
+
     use pretty_assertions::assert_eq;
 
     use super::*;
 
-    fn decode_stream(input: &[u8]) -> String {
-        println!("Input:");
-        let mut s = Vec::new();
-        _ = hxdmp::hexdump(input, &mut s);
-        println!("{}", String::from_utf8_lossy(&s));
-        let mut parser = VTPushParser::new();
-        let mut result = String::new();
-        let mut callback = |vt_input: VTEvent<'_>| {
-            result.push_str(&format!("{:?}\n", vt_input));
-        };
-        parser.feed_with(input, &mut callback);
-        println!("Result:");
-        println!("{}", result);
-        result
-    }
-
-    #[test]
-    fn test_large_escape2() {
-        let result = decode_stream(
-            &hex::decode(
-                r#"
-        1b5b495445524d3220332e352e31346e1b5d31303b7267623a646361612f6
-        46361622f646361611b5c1b5d31313b7267623a313538652f313933612f31
-        6537351b5c1b5b3f36343b313b323b343b363b31373b31383b32313b32326
-        31b5b3e36343b323530303b30631b50217c36393534373236441b5c1b503e
-        7c695465726d3220332e352e31341b5c1b5b383b33343b31343874"#
-                    .replace(char::is_whitespace, ""),
-            )
-            .unwrap(),
-        );
-        assert_eq!(
-            result.trim(),
-            r#"
-Csi(, '', 'I')
-Raw('TERM2 3.5.14n')
-OscStart
-OscData('10;rgb:dcaa/dcab/dcaa')
-OscEnd
-OscStart
-OscData('11;rgb:158e/193a/1e75')
-OscEnd
-Csi('?', '64', '1', '2', '4', '6', '17', '18', '21', '22', '', 'c')
-Csi('>', '64', '2500', '0', '', 'c')
-DcsStart(, '!', |)
-DcsData('6954726D')
-DcsEnd
-DcsStart('>', '', |)
-DcsData('iTerm2 3.5.14')
-DcsEnd
-Csi(, '8', '34', '148', '', 't')
-        "#
-            .trim()
-        );
-    }
-
-    #[test]
-    fn test_basic_escape_sequences() {
-        // Test basic ESC sequences
-        let result = decode_stream(b"\x1b[1;2;3d");
-        assert_eq!(result.trim(), "Csi(, '1', '2', '3', '', 'd')");
-
-        // Test ESC with intermediate
-        let result = decode_stream(b"\x1b  M");
-        assert_eq!(result.trim(), "Esc('  ', M)");
-
-        // Test SS3 (ESC O)
-        let result = decode_stream(b"\x1bOA");
-        assert_eq!(result.trim(), "Esc('', O)\nRaw('A')");
-    }
-
-    #[test]
-    fn test_csi_sequences() {
-        // Test CSI with private parameter
-        let result = decode_stream(b"\x1b[?25h");
-        assert_eq!(result.trim(), "Csi('?', '25', '', 'h')");
-
-        // Test CSI with multiple parameters
-        let result = decode_stream(b"\x1b[1;2;3;4;5m");
-        assert_eq!(result.trim(), "Csi(, '1', '2', '3', '4', '5', '', 'm')");
-
-        // Test CSI with colon parameter
-        let result = decode_stream(b"\x1b[3:1;2;3;4;5m");
-        assert_eq!(result.trim(), "Csi(, '3:1', '2', '3', '4', '5', '', 'm')");
-
-        // Test CSI with intermediate
-        let result = decode_stream(b"\x1b[  M");
-        assert_eq!(result.trim(), "Csi(, '  ', 'M')");
-    }
-
-    #[test]
-    fn test_dcs_sequences() {
-        // Test DCS with parameters
-        let result = decode_stream(b"\x1bP 1;2;3|test data\x1b\\");
-        assert_eq!(
-            result.trim(),
-            "DcsStart(, ' ', 1)\nDcsData(';2;3|test data')\nDcsEnd"
-        );
-
-        // Test DCS with private parameter
-        let result = decode_stream(b"\x1bP>1;2;3|more data\x1b\\");
-        assert_eq!(
-            result.trim(),
-            "DcsStart('>', '1', '2', '3', '', |)\nDcsData('more data')\nDcsEnd"
-        );
-
-        // Test DCS with intermediate
-        let result = decode_stream(b"\x1bP 1;2;3  |data\x1b\\");
-        assert_eq!(
-            result.trim(),
-            "DcsStart(, ' ', 1)\nDcsData(';2;3  |data')\nDcsEnd"
-        );
-
-        let result = decode_stream(b"\x1bP1$r\x1b\\");
-        assert_eq!(result.trim(), "DcsStart(, '1', '$', r)\nDcsEnd");
-    }
-
-    #[test]
-    fn test_osc_sequences() {
-        // Test OSC with BEL terminator
-        let result = decode_stream(b"\x1b]10;rgb:fff/000/000\x07");
-        assert_eq!(
-            result.trim(),
-            "OscStart\nOscData('10;rgb:fff/000/000')\nOscEnd"
-        );
-
-        // Test OSC with ST terminator
-        let result = decode_stream(b"\x1b]11;rgb:000/fff/000\x1b\\");
-        assert_eq!(
-            result.trim(),
-            "OscStart\nOscData('11;rgb:000/fff/000')\nOscEnd"
-        );
-
-        // Test OSC with escape in data
-        let result = decode_stream(b"\x1b]12;test [data\x1b\\");
-        assert_eq!(result.trim(), "OscStart\nOscData('12;test [data')\nOscEnd");
-    }
-
-    #[test]
-    fn test_cancellation_and_invalid_sequences() {
-        // Test CAN cancellation in CSI
-        let result = decode_stream(b"x\x1b[1;2;3\x18y");
-        assert_eq!(result.trim(), "Raw('x')\nRaw('y')");
-
-        // Test SUB cancellation in CSI
-        let result = decode_stream(b"x\x1b[1;2;3\x1ay");
-        assert_eq!(result.trim(), "Raw('x')\nRaw('y')");
-
-        // Test CAN cancellation in DCS (parser completes DCS then returns to ground)
-        let result = decode_stream(b"x\x1bP 1;2;3|data\x18y");
-        assert_eq!(
-            result.trim(),
-            "Raw('x')\nDcsStart(, ' ', 1)\nDcsCancel\nRaw('y')"
-        );
-
-        // Test SUB cancellation in OSC (parser emits OscStart then cancels)
-        let result = decode_stream(b"x\x1b]10;data\x1ay");
-        assert_eq!(result.trim(), "Raw('x')\nOscStart\nOscCancel\nRaw('y')");
-
-        // Test invalid CSI sequence (ignored)
-        let result = decode_stream(b"x\x1b[1;2;3gy");
-        assert_eq!(
-            result.trim(),
-            "Raw('x')\nCsi(, '1', '2', '3', '', 'g')\nRaw('y')"
-        );
-
-        // Test CSI ignore state
-        let result = decode_stream(b"x\x1b[:1;2;3gy");
-        assert_eq!(
-            result.trim(),
-            "Raw('x')\nCsi(, ':1', '2', '3', '', 'g')\nRaw('y')"
-        );
-    }
-
-    #[test]
-    fn test_escape_sequences_with_raw_text() {
-        // Test mixed raw text and escape sequences
-        let result = decode_stream(b"Hello\x1b[1;2;3dWorld");
-        assert_eq!(
-            result.trim(),
-            "Raw('Hello')\nCsi(, '1', '2', '3', '', 'd')\nRaw('World')"
-        );
-
-        // Test escape sequences with UTF-8 text
-        let result = decode_stream(b"\x1b[1;2;3d\xe4\xb8\xad\xe6\x96\x87");
-        assert_eq!(result.trim(), "Csi(, '1', '2', '3', '', 'd')\nRaw('中文')");
-    }
-
-    #[test]
-    fn test_c0_control_characters() {
-        // Test various C0 control characters
-        let result = decode_stream(b"\x0a\x0d\x09\x08\x0c\x0b");
-        assert_eq!(
-            result.trim(),
-            "C0(0a)\nC0(0d)\nC0(09)\nC0(08)\nC0(0c)\nC0(0b)"
-        );
-
-        // Test C0 with raw text
-        let result = decode_stream(b"Hello\x0aWorld");
-        assert_eq!(result.trim(), "Raw('Hello')\nC0(0a)\nRaw('World')");
-    }
-
-    #[test]
-    fn test_complex_escape_sequences() {
-        // Test complex CSI with all features
-        let result = decode_stream(&hex::decode("1b5b3f32353b313b323b333a343b353b363b373b383b393b31303b31313b31323b31333b31343b31353b31363b31373b31383b31393b32303b32313b32323b32333b32343b32353b32363b32373b32383b32393b33303b33313b33323b33333b33343b33353b33363b33373b33383b33393b34303b34313b34323b34333b34343b34353b34363b34373b34383b34393b35303b35313b35323b35333b35343b35353b35363b35373b35383b35393b36303b36313b36323b36333b36343b36353b36363b36373b36383b36393b37303b37313b37323b37333b37343b37353b37363b37373b37383b37393b38303b38313b38323b38333b38343b38353b38363b38373b38383b38393b39303b39313b39323b39333b39343b39353b39363b39373b39383b39393b3130306d").unwrap());
-        assert_eq!(
-            result.trim(),
-            "Csi('?', '25', '1', '2', '3:4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57', '58', '59', '60', '61', '62', '63', '64', '65', '66', '67', '68', '69', '70', '71', '72', '73', '74', '75', '76', '77', '78', '79', '80', '81', '82', '83', '84', '85', '86', '87', '88', '89', '90', '91', '92', '93', '94', '95', '96', '97', '98', '99', '100', '', 'm')"
-        );
-    }
-
-    #[test]
-    fn test_escape_sequences_with_del() {
-        // Test DEL character handling
-        let result = decode_stream(b"\x1b[1;2;3\x7fm");
-        assert_eq!(result.trim(), "Csi(, '1', '2', '3', '', 'm')");
-
-        // Test DEL in raw text
-        let result = decode_stream(b"Hello\x7fWorld");
-        assert_eq!(result.trim(), "Raw('HelloWorld')");
-    }
-
-    #[test]
-    fn test_escape_sequences_with_esc_esc() {
-        // Test ESC ESC sequence
-        let result = decode_stream(b"\x1b\x1b[1;2;3d");
-        assert_eq!(result.trim(), "Csi(, '1', '2', '3', '', 'd')");
-
-        let result = decode_stream(b"\x1bP 1;2;3|\x1b\x1bdata\x1b\\");
-        // Note: ESC ESC in DCS is handled correctly by the parser, escaping is done by the receiver
-        assert_eq!(
-            result.trim().replace("\x1b", "<ESC>"),
-            "DcsStart(, ' ', 1)\nDcsData(';2;3|<ESC>data')\nDcsEnd"
-        );
-    }
-
-    #[test]
-    fn test_sos_pm_apc_sequences() {
-        // Test SOS (ESC X)
-        let result = decode_stream(b"\x1bXtest data\x1b\\");
-        assert_eq!(result.trim(), "");
-
-        // Test PM (ESC ^)
-        let result = decode_stream(b"\x1b^test data\x1b\\");
-        assert_eq!(result.trim(), "");
-
-        // Test APC (ESC _)
-        let result = decode_stream(b"\x1b_test data\x1b\\");
-        assert_eq!(result.trim(), "");
-    }
-
     #[test]
     fn test_edge_cases() {
         // Test empty input
-        let result = decode_stream(&[]);
+        let mut result = String::new();
+        VTPushParser::decode_buffer(&[], |e| result.push_str(&format!("{:?}\n", e)));
         assert_eq!(result.trim(), "");
 
         // Test single ESC
-        let result = decode_stream(b"\x1b");
+        let mut result = String::new();
+        VTPushParser::decode_buffer(b"\x1b", |e| result.push_str(&format!("{:?}\n", e)));
         assert_eq!(result.trim(), "");
 
         // Test incomplete CSI
-        let result = decode_stream(b"\x1b[");
+        let mut result = String::new();
+        VTPushParser::decode_buffer(b"\x1b[", |e| result.push_str(&format!("{:?}\n", e)));
         assert_eq!(result.trim(), "");
 
         // Test incomplete DCS
-        let result = decode_stream(b"\x1bP");
+        let mut result = String::new();
+        VTPushParser::decode_buffer(b"\x1bP", |e| result.push_str(&format!("{:?}\n", e)));
         assert_eq!(result.trim(), "");
 
         // Test incomplete OSC
-        let result = decode_stream(b"\x1b]");
+        let mut result = String::new();
+        VTPushParser::decode_buffer(b"\x1b]", |e| result.push_str(&format!("{:?}\n", e)));
         assert_eq!(result.trim(), "OscStart");
-    }
-
-    #[test]
-    fn test_unicode_and_special_characters() {
-        // Test with Unicode characters
-        let result = decode_stream(b"\x1b[1;2;3d\xe4\xb8\xad\xe6\x96\x87");
-        assert_eq!(result.trim(), "Csi(, '1', '2', '3', '', 'd')\nRaw('中文')");
-
-        // Test with special ASCII characters
-        let result = decode_stream(b"\x1b[1;2;3d~!@#$%^&*()_+|\\{}[]:;\"|<>,.?/");
-        assert_eq!(
-            result.trim(),
-            "Csi(, '1', '2', '3', '', 'd')\nRaw('~!@#$%^&*()_+|\\{}[]:;\"|<>,.?/')"
-        );
     }
 
     #[test]
@@ -1377,124 +893,6 @@ Csi(, '8', '34', '148', '', 't')
         parser.finish(&mut callback);
 
         assert_eq!(result.trim(), "");
-    }
-
-    #[test]
-    fn test_csi_colons() {
-        let test_cases: Vec<(&'static [u8], &[&str], u8)> = vec![
-            // 1. FG truecolor
-            (b"\x1b[38:2:255:128:64m", &["38:2:255:128:64"], b'm'),
-            // 2. BG truecolor
-            (b"\x1b[48:2:0:0:0m", &["48:2:0:0:0"], b'm'),
-            // 3. FG indexed
-            (b"\x1b[38:5:208m", &["38:5:208"], b'm'),
-            // 4. BG indexed
-            (b"\x1b[48:5:123m", &["48:5:123"], b'm'),
-            // 5. Bold + FG indexed + BG truecolor
-            (
-                b"\x1b[1;38:5:208;48:2:30:30:30m",
-                &["1", "38:5:208", "48:2:30:30:30"],
-                b'm',
-            ),
-            // 6. Reset + FG truecolor
-            (b"\x1b[0;38:2:12:34:56m", &["0", "38:2:12:34:56"], b'm'),
-            // 7. Underline color truecolor with empty subparam (::)
-            (b"\x1b[58:2::186:93:0m", &["58:2::186:93:0"], b'm'),
-            // 8. FG truecolor + BG indexed + underline color truecolor
-            (
-                b"\x1b[38:2:10:20:30;48:5:17;58:2::200:100:0m",
-                &["38:2:10:20:30", "48:5:17", "58:2::200:100:0"],
-                b'm',
-            ),
-            // 9. Colon params with leading zeros
-            (b"\x1b[38:2:000:007:042m", &["38:2:000:007:042"], b'm'),
-            // 10. Large RGB values
-            (b"\x1b[38:2:300:300:300m", &["38:2:300:300:300"], b'm'),
-            // 11. Trailing semicolon with colon param (empty final param)
-            (b"\x1b[38:5:15;m", &["38:5:15", ""], b'm'),
-            // 12. Only colon param (no numeric params)
-            (b"\x1b[38:2:1:2:3m", &["38:2:1:2:3"], b'm'),
-        ];
-
-        for (input, expected_params, expected_final) in test_cases {
-            let mut parser = VTPushParser::new();
-            parser.feed_with(input, |event| match event {
-                VTEvent::Csi {
-                    private,
-                    params,
-                    intermediates,
-                    final_byte,
-                } => {
-                    assert_eq!(
-                        private, None,
-                        "Expected no private prefix for input {:?}",
-                        input
-                    );
-                    assert_eq!(
-                        intermediates.is_empty(),
-                        true,
-                        "Expected no intermediates for input {:?}",
-                        input
-                    );
-                    assert_eq!(
-                        final_byte, expected_final,
-                        "Expected final byte '{}' for input {:?}",
-                        expected_final, input
-                    );
-
-                    let param_strings: Vec<String> = params
-                        .iter()
-                        .map(|p| String::from_utf8_lossy(p).to_string())
-                        .collect();
-                    assert_eq!(
-                        param_strings, expected_params,
-                        "Parameter mismatch for input {:?}",
-                        input
-                    );
-                }
-                _ => panic!("Expected CSI event for input {:?}, got {:?}", input, event),
-            });
-        }
-    }
-
-    #[test]
-    fn test_dcs_ignore_st_handling() {
-        // Test that DCS_IGNORE state doesn't handle ST (ESC \) as per spec
-        // This test documents the current behavior which differs from the specification
-
-        // Create a DCS sequence that goes into ignore state (using colon)
-        // ESC P : 1;2;3 | data ESC \
-        // The colon should put us in DCS_IGNORE, then ESC \ should transition to GROUND per spec
-        let result = decode_stream(b"Hello\x1bP:1;2;3|data\x1b\\World");
-
-        // Current implementation: DCS_IGNORE ignores ST, so we stay in ignore state
-        // and the sequence is never properly terminated
-        // Expected: Should transition to GROUND after ST, but current implementation doesn't
-        assert_eq!(result.trim(), "Raw('Hello')\nRaw('World')");
-
-        // Test with additional data after the ST to see if we're back in GROUND
-        let result = decode_stream(b"\x1bP:1;2;3|data\x1b\\Hello");
-
-        // This should show that we're not properly back in GROUND state
-        // because the ST wasn't handled in DCS_IGNORE
-        assert_eq!(result.trim(), "Raw('Hello')");
-
-        // Compare with a valid DCS sequence that doesn't go into ignore state
-        let result = decode_stream(b"\x1bP1;2;3|data\x1b\\Hello");
-        assert_eq!(
-            result.trim(),
-            "DcsStart(, '1', '2', '3', '', |)\nDcsData('data')\nDcsEnd\nRaw('Hello')"
-        );
-    }
-
-    #[test]
-    fn test_dcs_ignore_cancellation() {
-        // Test that CAN/SUB properly cancel DCS_IGNORE state
-        let result = decode_stream(b"\x1bP:1;2;3|data\x18Hello"); // CAN
-        assert_eq!(result.trim(), "Raw('Hello')");
-
-        let result = decode_stream(b"\x1bP:1;2;3|data\x1aHello"); // SUB
-        assert_eq!(result.trim(), "Raw('Hello')");
     }
 
     #[test]
@@ -1650,9 +1048,6 @@ Csi(, '8', '34', '148', '', 't')
         p.feed_with(input, |ev| out.push(format!("{:?}", ev)));
         out
     }
-
-    const CAN: u8 = 0x18;
-    const SUB: u8 = 0x1A;
 
     #[test]
     fn dcs_aborted_by_can_before_body() {

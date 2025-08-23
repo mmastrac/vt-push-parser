@@ -15,3 +15,8 @@ hex = "0.4.3"
 [dev-dependencies]
 pretty_assertions = "1.4.0"
 hxdmp = "0.2.1"
+
+[[test]]
+name = "escapes"
+path = "tests/escapes.rs"
+harness = false
