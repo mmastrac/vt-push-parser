@@ -1,101 +1,120 @@
 use pretty_assertions::assert_eq;
+use vt_push_parser::ascii::{decode_string, encode_string};
 use vt_push_parser::{VTEvent, VTPushParser};
 
 const INPUT: &str = include_str!("escapes.txt");
 
-fn decode_string(input: &str) -> Vec<u8> {
-    let mut result = Vec::new();
-    let mut chars = input.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        if ch == '<' {
-            // Collect characters until '>'
-            let mut control_name = String::new();
-            while let Some(ch) = chars.next() {
-                if ch == '>' {
-                    break;
-                }
-                control_name.push(ch);
-            }
-
-            // Parse the control name and convert to byte
-            match control_name.to_uppercase().as_str() {
-                "NUL" => result.push(0),
-                "SOH" => result.push(1),
-                "STX" => result.push(2),
-                "ETX" => result.push(3),
-                "EOT" => result.push(4),
-                "ENQ" => result.push(5),
-                "ACK" => result.push(6),
-                "BEL" => result.push(7),
-                "BS" => result.push(8),
-                "TAB" => result.push(9),
-                "LF" => result.push(10),
-                "VT" => result.push(11),
-                "FF" => result.push(12),
-                "CR" => result.push(13),
-                "SO" => result.push(14),
-                "SI" => result.push(15),
-                "DLE" => result.push(16),
-                "DC1" => result.push(17),
-                "DC2" => result.push(18),
-                "DC3" => result.push(19),
-                "DC4" => result.push(20),
-                "NAK" => result.push(21),
-                "SYN" => result.push(22),
-                "ETB" => result.push(23),
-                "CAN" => result.push(24),
-                "EM" => result.push(25),
-                "SUB" => result.push(26),
-                "ESC" => result.push(27),
-                "FS" => result.push(28),
-                "GS" => result.push(29),
-                "RS" => result.push(30),
-                "US" => result.push(31),
-                "DEL" => result.push(127),
-                _ => {
-                    // If not a recognized control code, treat as literal text
-                    result.push(b'<');
-                    result.extend_from_slice(control_name.as_bytes());
-                    result.push(b'>');
-                }
-            }
-        } else {
-            // Regular character, convert to byte
-            let mut buf = [0; 4];
-            let char_bytes = ch.encode_utf8(&mut buf);
-            result.extend_from_slice(char_bytes.as_bytes());
-        }
-    }
-
-    result
+enum VTAccumulator {
+    Raw(String),
+    Esc(String),
+    Dcs(String),
+    Osc(String),
 }
 
 fn parse(data: &[&[u8]]) -> String {
     let mut parser = VTPushParser::new();
-    let mut result = String::new();
-    let mut callback = |vt_input: VTEvent<'_>| {
-        result.push_str(&format!("{:?}\n", vt_input));
+    let mut result = Vec::new();
+    let mut callback = |vt_input: VTEvent<'_>| match vt_input {
+        VTEvent::Raw(s) => {
+            if let Some(VTAccumulator::Raw(acc)) = result.last_mut() {
+                acc.push_str(&encode_string(s));
+            } else {
+                result.push(VTAccumulator::Raw(encode_string(s)));
+            }
+        }
+        VTEvent::Csi { .. } | VTEvent::Ss3 { .. } | VTEvent::Esc { .. } | VTEvent::C0(_) => {
+            result.push(VTAccumulator::Esc(format!("{vt_input:?}")))
+        }
+        VTEvent::DcsStart { .. } => result.push(VTAccumulator::Dcs(format!("{vt_input:?}, data="))),
+        VTEvent::DcsData(s) => {
+            let VTAccumulator::Dcs(acc) = result.last_mut().unwrap() else {
+                panic!("DcsData without DcsStart");
+            };
+            acc.push_str(&encode_string(s));
+        }
+        VTEvent::DcsEnd => {}
+        VTEvent::DcsCancel => {
+            let VTAccumulator::Dcs(acc) = result.last_mut().unwrap() else {
+                panic!("DcsCancel without DcsStart");
+            };
+            *acc = format!("{} (cancelled)", acc.split_once(", data=").unwrap().0);
+        }
+        VTEvent::OscStart => result.push(VTAccumulator::Osc("OscStart, data=".to_string())),
+        VTEvent::OscData(s) => {
+            let VTAccumulator::Osc(acc) = result.last_mut().unwrap() else {
+                panic!("OscData without OscStart");
+            };
+            acc.push_str(&encode_string(s));
+        }
+        VTEvent::OscEnd { .. } => {}
+        VTEvent::OscCancel => {
+            let VTAccumulator::Osc(acc) = result.last_mut().unwrap() else {
+                panic!("OscCancel without OscStart");
+            };
+            *acc = format!("{} (cancelled)", acc.split_once(", data=").unwrap().0);
+        }
     };
     for chunk in data {
         parser.feed_with(chunk, &mut callback);
     }
-    result
+
+    let mut result_string = String::new();
+    for acc in result {
+        match acc {
+            VTAccumulator::Raw(s) => result_string.push_str(&s),
+            VTAccumulator::Esc(s) => result_string.push_str(&s),
+            VTAccumulator::Dcs(s) => result_string.push_str(&s),
+            VTAccumulator::Osc(s) => result_string.push_str(&s),
+        }
+        result_string.push('\n');
+    }
+    result_string
 }
 
 fn test(output: &mut String, test_name: &str, line: &str, decoded: &[u8]) {
     let result = parse(&[decoded]);
 
+    // Ensure that the result is the same when parsing in various chunk sizes
+    for chunk_size in 1..=decoded.len() {
+        let mut byte_by_byte = Vec::new();
+        for b in decoded.chunks(chunk_size) {
+            byte_by_byte.push(b);
+        }
+        let result_byte_by_byte = parse(&byte_by_byte);
+        assert_eq!(
+            result, result_byte_by_byte,
+            "Failed to parse in chunks of size {chunk_size}"
+        );
+    }
+
     // Ensure that prefix and suffix to each side of the decoded data are parsed
     // correctly. This should probably be more of a fuzz test instead.
     let result_prefix = parse(&[b"prefix", decoded]);
-    assert_eq!(result_prefix, "Raw('prefix')\n".to_owned() + &result);
+    let e1 = format!("prefix\n{result}");
+    let e2 = format!("prefix{result}");
+    if result_prefix != e1 && result_prefix != e2 {
+        panic!(
+            "Prefix string did not match expectations:\n{result_prefix}\nExpected one of:\n{e1}\n-- or --\n\n{e2}"
+        );
+    }
 
     let result_suffix = parse(&[decoded, b"suffix"]);
-    assert_eq!(result_suffix, result.clone() + "Raw('suffix')\n");
+    let e1 = format!("{result}suffix\n");
+    let e2 = format!("{}suffix\n", result.trim_end());
+    if result_suffix != e1 && result_suffix != e2 {
+        panic!(
+            "Suffix string did not match expectations:\n{result_suffix}\nExpected one of:\n{e1}\n-- or --\n\n{e2}"
+        );
+    }
 
     let result_prefix = parse(&["✅🛜".as_bytes(), decoded]);
-    assert_eq!(result_prefix, "Raw('✅🛜')\n".to_owned() + &result);
+    let e1 = format!("✅🛜\n{result}");
+    let e2 = format!("✅🛜{result}");
+    if result_prefix != e1 && result_prefix != e2 {
+        panic!(
+            "Prefix string did not match expectations:\n{result_prefix}\nExpected one of:\n{e1}\n-- or --\n\n{e2}"
+        );
+    }
 
     output.push_str(&format!("## {test_name}\n```\n{}\n```\n\n", line));
     output.push_str("```\n");
@@ -105,9 +124,11 @@ fn test(output: &mut String, test_name: &str, line: &str, decoded: &[u8]) {
 }
 
 pub fn main() {
+    println!();
     eprintln!("Testing escapes.txt");
 
     let mut output = String::new();
+    let mut failures = 0;
     output.push_str("# Escapes\n");
 
     let mut test_name = String::new();
@@ -122,7 +143,24 @@ pub fn main() {
         }
         let decoded = decode_string(line);
         println!("  running {:?} ...", test_name);
-        test(&mut output, &std::mem::take(&mut test_name), line, &decoded);
+        let test_name_clone = test_name.clone();
+        let Ok(test_output) = std::panic::catch_unwind(move || {
+            let mut output = String::new();
+            test(&mut output, &test_name_clone, line, &decoded);
+            output
+        }) else {
+            eprintln!("  test {:?} panicked", test_name);
+            failures += 1;
+            continue;
+        };
+        output.push_str(&test_output);
+    }
+
+    println!();
+
+    if failures > 0 {
+        eprintln!("{} tests failed", failures);
+        std::process::exit(1);
     }
 
     if std::env::var("UPDATE").is_ok() {
@@ -130,7 +168,6 @@ pub fn main() {
     } else {
         let expected = std::fs::read_to_string("tests/result.md").unwrap();
         assert_eq!(expected, output);
-        println!();
         println!("all tests passed");
     }
 }

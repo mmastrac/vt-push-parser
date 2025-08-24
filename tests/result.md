@@ -15,21 +15,13 @@ Csi('?', '25', '1', '2', '3:4', '5', '6', '7', '8', '9', '10', '11', '12', '13',
 
 ```
 Csi(, '', 'I')
-Raw('TERM2 3.5.14n')
-OscStart
-OscData('10;rgb:dcaa/dcab/dcaa')
-OscEnd
-OscStart
-OscData('11;rgb:158e/193a/1e75')
-OscEnd
+TERM2 3.5.14n
+OscStart, data=10;rgb:dcaa/dcab/dcaa
+OscStart, data=11;rgb:158e/193a/1e75
 Csi('?', '64', '1', '2', '4', '6', '17', '18', '21', '22', '', 'c')
 Csi('>', '64', '2500', '0', '', 'c')
-DcsStart(, '!', |)
-DcsData('6954726D')
-DcsEnd
-DcsStart('>', '', |)
-DcsData('iTerm2 3.5.14')
-DcsEnd
+DcsStart(, '!', |), data=6954726D
+DcsStart('>', '', |), data=iTerm2 3.5.14
 Csi(, '8', '34', '148', '', 't')
 ```
 ---
@@ -53,9 +45,9 @@ Hello<LF>World
 ```
 
 ```
-Raw('Hello')
+Hello
 C0(0a)
-Raw('World')
+World
 ```
 ---
 ## Raw text with delete character
@@ -64,9 +56,9 @@ Hello<DEL>World
 ```
 
 ```
-Raw('Hello')
+Hello
 C0(7f)
-Raw('World')
+World
 ```
 ---
 ## CSI: Cursor down with parameters 1,2,3
@@ -120,9 +112,7 @@ Csi(, '  ', 'M')
 ```
 
 ```
-OscStart
-OscData('10;rgb:fff/000/000')
-OscEnd
+OscStart, data=10;rgb:fff/000/000
 ```
 ---
 ## OSC: Set background color to green (11;rgb:000/fff/000) terminated by ST
@@ -131,9 +121,7 @@ OscEnd
 ```
 
 ```
-OscStart
-OscData('11;rgb:000/fff/000')
-OscEnd
+OscStart, data=11;rgb:000/fff/000
 ```
 ---
 ## OSC: Set text color (12;test [data) terminated by ST
@@ -142,9 +130,7 @@ OscEnd
 ```
 
 ```
-OscStart
-OscData('12;test [data')
-OscEnd
+OscStart, data=12;test [data
 ```
 ---
 ## DCS: Device control string with parameters (1,2,3) and payload terminated by ST
@@ -153,9 +139,7 @@ OscEnd
 ```
 
 ```
-DcsStart(, ' ', 1)
-DcsData(';2;3|test data')
-DcsEnd
+DcsStart(, ' ', 1), data=;2;3|test data
 ```
 ---
 ## DCS: Device control string with private parameter > and payload terminated by ST
@@ -164,9 +148,7 @@ DcsEnd
 ```
 
 ```
-DcsStart('>', '1', '2', '3', '', |)
-DcsData('more data')
-DcsEnd
+DcsStart('>', '1', '2', '3', '', |), data=more data
 ```
 ---
 ## DCS: Device control string with intermediate space and payload terminated by ST
@@ -175,9 +157,7 @@ DcsEnd
 ```
 
 ```
-DcsStart(, ' ', 1)
-DcsData(';2;3  |data')
-DcsEnd
+DcsStart(, ' ', 1), data=;2;3  |data
 ```
 ---
 ## DCS: Device control string with final r and payload terminated by ST
@@ -186,8 +166,7 @@ DcsEnd
 ```
 
 ```
-DcsStart(, '1', '$', r)
-DcsEnd
+DcsStart(, '1', '$', r), data=
 ```
 ---
 ## ESC: Escape sequence with intermediate space and final M
@@ -206,7 +185,7 @@ Esc('  ', M)
 
 ```
 Esc('', O)
-Raw('A')
+A
 ```
 ---
 ## DCS: CSI payload
@@ -215,9 +194,7 @@ Raw('A')
 ```
 
 ```
-DcsStart(, '', q)
-DcsData('<ESC>[38:2:12:34:56m')
-DcsEnd
+DcsStart(, '', q), data=<ESC>[38:2:12:34:56m
 ```
 ---
 ## DCS: Device control string with colon parameter (invalid/DCS_IGNORE) cancelled by CAN
@@ -226,7 +203,7 @@ DcsEnd
 ```
 
 ```
-Raw('Hello')
+Hello
 ```
 ---
 ## DCS: Device control string with colon parameter (invalid/DCS_IGNORE) cancelled by SUB
@@ -235,7 +212,7 @@ Raw('Hello')
 ```
 
 ```
-Raw('Hello')
+Hello
 ```
 ---
 ## SOS: Start of string (ESC X) with payload terminated by ST
@@ -268,8 +245,7 @@ x<ESC>[1;2;3<CAN>y
 ```
 
 ```
-Raw('x')
-Raw('y')
+xy
 ```
 ---
 ## CSI: Cursor down sequence cancelled by SUB
@@ -278,8 +254,7 @@ x<ESC>[1;2;3<SUB>y
 ```
 
 ```
-Raw('x')
-Raw('y')
+xy
 ```
 ---
 ## DCS: Device control string cancelled by CAN
@@ -288,10 +263,9 @@ x<ESC>P 1;2;3|data<CAN>y
 ```
 
 ```
-Raw('x')
-DcsStart(, ' ', 1)
-DcsCancel
-Raw('y')
+x
+DcsStart(, ' ', 1) (cancelled)
+y
 ```
 ---
 ## OSC: Operating system command cancelled by SUB
@@ -300,10 +274,9 @@ x<ESC>]10;data<SUB>y
 ```
 
 ```
-Raw('x')
-OscStart
-OscCancel
-Raw('y')
+x
+OscStart (cancelled)
+y
 ```
 ---
 ## CSI: Invalid final byte g (should be ignored)
@@ -312,9 +285,9 @@ x<ESC>[1;2;3gy
 ```
 
 ```
-Raw('x')
+x
 Csi(, '1', '2', '3', '', 'g')
-Raw('y')
+y
 ```
 ---
 ## CSI: Invalid colon parameter (should be ignored)
@@ -323,9 +296,9 @@ x<ESC>[:1;2;3gy
 ```
 
 ```
-Raw('x')
+x
 Csi(, ':1', '2', '3', '', 'g')
-Raw('y')
+y
 ```
 ---
 ## ESC ESC: Double escape followed by CSI cursor down
@@ -343,9 +316,7 @@ Csi(, '1', '2', '3', '', 'd')
 ```
 
 ```
-DcsStart(, ' ', 1)
-DcsData(';2;3|<ESC><ESC>data')
-DcsEnd
+DcsStart(, ' ', 1), data=;2;3|<ESC><ESC>data
 ```
 ---
 ## DCS: Device control string with ESC before ending
@@ -354,9 +325,7 @@ DcsEnd
 ```
 
 ```
-DcsStart(, ' ', 1)
-DcsData(';2;3|<ESC>')
-DcsEnd
+DcsStart(, ' ', 1), data=;2;3|<ESC>
 ```
 ---
 ## DCS: Device control string with double ESC before ending
@@ -365,9 +334,7 @@ DcsEnd
 ```
 
 ```
-DcsStart(, ' ', 1)
-DcsData(';2;3|<ESC><ESC>')
-DcsEnd
+DcsStart(, ' ', 1), data=;2;3|<ESC><ESC>
 ```
 ---
 ## CSI: Graphics mode with DEL character in parameters
@@ -385,8 +352,7 @@ Hello<ESC>P:1;2;3|data<ESC>\World
 ```
 
 ```
-Raw('Hello')
-Raw('World')
+HelloWorld
 ```
 ---
 ## DCS: Device control string with colon parameter (invalid) in text context
@@ -395,7 +361,7 @@ Raw('World')
 ```
 
 ```
-Raw('Hello')
+Hello
 ```
 ---
 ## DCS: Valid device control string in text context
@@ -404,10 +370,8 @@ Raw('Hello')
 ```
 
 ```
-DcsStart(, '1', '2', '3', '', |)
-DcsData('data')
-DcsEnd
-Raw('Hello')
+DcsStart(, '1', '2', '3', '', |), data=data
+Hello
 ```
 ---
 ## CSI: FG truecolor

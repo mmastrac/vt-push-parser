@@ -1,5 +1,6 @@
 pub mod ascii;
 pub mod event;
+pub mod iter;
 pub mod signature;
 
 use smallvec::SmallVec;
@@ -107,6 +108,7 @@ pub struct VTPushParser {
     cur_param: Vec<u8>,
     priv_prefix: Option<u8>,
     held_byte: Option<u8>,
+    held_emit: Option<VTEmit>,
 
     // Streaming buffer (DCS/OSC bodies)
     used_bel: bool,
@@ -121,6 +123,7 @@ impl VTPushParser {
             cur_param: Vec::with_capacity(8),
             priv_prefix: None,
             held_byte: None,
+            held_emit: None,
             used_bel: false,
         }
     }
@@ -136,92 +139,109 @@ impl VTPushParser {
     // Callback-driven API
     // =====================
 
+    /// Feed bytes into the parser. This is the main entry point for the parser.
+    /// It will call the callback with events as they are emitted.
+    ///
+    /// The callback must be valid for the lifetime of the `feed_with` call.
+    ///
+    /// The callback may emit any number of events (including zero), depending
+    /// on the state of the internal parser.
     pub fn feed_with<'this: 'input, 'input, F: for<'any> FnMut(VTEvent<'any>)>(
         &'this mut self,
         input: &'input [u8],
         cb: &mut F,
     ) {
-        let mut buffer_idx = 0;
-        let mut current_emit = None;
-        let mut held_byte = self.held_byte.take();
-        let mut hold = held_byte.is_some();
+        if input.is_empty() {
+            return;
+        }
 
-        let mut action_handler = |mut i: usize, action: VTAction| {
-            // Special case: carryover from previous. We need to emit it on its own.
-            if let Some(b) = held_byte.take() {
-                match action {
-                    VTAction::Buffer(emit) => match emit {
-                        VTEmit::Ground => cb(VTEvent::Raw(&[b])),
-                        VTEmit::Dcs => cb(VTEvent::DcsData(&[b])),
-                        VTEmit::Osc => cb(VTEvent::OscData(&[b])),
-                    },
-                    _ => {}
-                }
-            }
+        struct State {
+            buffer_idx: usize,
+            current_emit: Option<VTEmit>,
+            hold: bool,
+        }
 
-            let mut emit_buffer = |emit: VTEmit, hold: bool| {
-                if hold {
-                    i = i - 1;
-                }
+        let mut state = State {
+            buffer_idx: 0,
+            current_emit: self.held_emit.take(),
+            hold: self.held_byte.is_some(),
+        };
 
-                if (buffer_idx..i).len() > 0 {
-                    match emit {
-                        VTEmit::Ground => cb(VTEvent::Raw(&input[buffer_idx..i])),
-                        VTEmit::Dcs => cb(VTEvent::DcsData(&input[buffer_idx..i])),
-                        VTEmit::Osc => cb(VTEvent::OscData(&input[buffer_idx..i])),
+        macro_rules! emit {
+            ($state:ident, $i:expr, $cb:expr) => {
+                let hold = std::mem::take(&mut $state.hold);
+                if let Some(emit) = $state.current_emit.take() {
+                    let mut i = $i;
+                    if hold {
+                        i = i - 1;
+                    }
+
+                    let range = $state.buffer_idx..i;
+                    if range.len() > 0 {
+                        match emit {
+                            VTEmit::Ground => $cb(VTEvent::Raw(&input[range])),
+                            VTEmit::Dcs => $cb(VTEvent::DcsData(&input[range])),
+                            VTEmit::Osc => $cb(VTEvent::OscData(&input[range])),
+                        }
                     }
                 }
             };
+        }
+
+        let mut held_byte = self.held_byte.take();
+
+        for (i, &b) in input.iter().enumerate() {
+            let action = self.push_with(b);
 
             match action {
-                VTAction::None => match current_emit.take() {
-                    Some(emit) => emit_buffer(emit, hold),
-                    None => {}
-                },
+                VTAction::None => {
+                    emit!(state, i, cb);
+                }
                 VTAction::Event(e) => {
-                    match current_emit.take() {
-                        Some(emit) => emit_buffer(emit, hold),
-                        None => {}
-                    };
+                    emit!(state, i, cb);
                     cb(e);
                 }
                 VTAction::Buffer(emit) | VTAction::Hold(emit) => {
-                    hold = matches!(action, VTAction::Hold(_));
-                    match current_emit {
-                        None => {
-                            buffer_idx = i;
-                            current_emit = Some(emit);
-                        }
-                        Some(x) if x == emit => {}
-                        Some(_) => {
-                            match current_emit.take() {
-                                Some(emit) => emit_buffer(emit, hold),
-                                None => {}
+                    if i == 0 {
+                        if let Some(h) = held_byte.take() {
+                            match emit {
+                                VTEmit::Ground => cb(VTEvent::Raw(&[h])),
+                                VTEmit::Dcs => cb(VTEvent::DcsData(&[h])),
+                                VTEmit::Osc => cb(VTEvent::OscData(&[h])),
                             }
-                            buffer_idx = i;
-                            current_emit = Some(emit);
                         }
+                    }
+
+                    debug_assert!(state.current_emit.is_none() || state.current_emit == Some(emit));
+
+                    state.hold = matches!(action, VTAction::Hold(_));
+                    if state.current_emit.is_none() {
+                        state.buffer_idx = i;
+                        state.current_emit = Some(emit);
                     }
                 }
                 VTAction::Cancel(emit) => {
-                    current_emit = None;
+                    state.current_emit = None;
+                    state.hold = false;
                     match emit {
                         VTEmit::Ground => unreachable!(),
                         VTEmit::Dcs => cb(VTEvent::DcsCancel),
                         VTEmit::Osc => cb(VTEvent::OscCancel),
                     }
                 }
-            }
-        };
-
-        for (i, &b) in input.iter().enumerate() {
-            action_handler(i, self.push_with(b));
+            };
         }
 
-        action_handler(input.len(), VTAction::None);
+        // Is there more to emit?
+        let hold = state.hold;
+        emit!(state, input.len(), cb);
+
+        if hold {
+            self.held_byte = Some(input[input.len() - 1]);
+        }
     }
 
-    pub fn push_with<'this, 'input>(&'this mut self, b: u8) -> VTAction<'this> {
+    fn push_with<'this, 'input>(&'this mut self, b: u8) -> VTAction<'this> {
         use State::*;
         match self.st {
             Ground => self.on_ground(b),
