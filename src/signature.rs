@@ -84,7 +84,7 @@ impl VTEscapeSignature {
                     && self.final_byte == *final_byte
                     && self.intermediates.const_eq(intermediates)
                     && self.const_private_eq(private)
-                    && self.const_contains(params.len())
+                    && self.const_contains(params.params.len())
             }
             VTEvent::Ss3 {
                 intermediates,

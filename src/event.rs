@@ -1,6 +1,6 @@
+use std::iter::Map;
+
 use crate::AsciiControl;
-
-
 
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
 pub struct VTIntermediate {
@@ -77,6 +77,44 @@ impl std::fmt::Debug for VTIntermediate {
     }
 }
 
+#[derive(PartialEq, Eq)]
+#[repr(transparent)]
+pub struct ParamBuf<'a> {
+    pub(crate) params: &'a Vec<Vec<u8>>,
+}
+
+impl<'a> IntoIterator for ParamBuf<'a> {
+    type Item = &'a [u8];
+    type IntoIter = Map<std::slice::Iter<'a, Vec<u8>>, fn(&Vec<u8>) -> &[u8]>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.params.iter().map(|p| p.as_slice())
+    }
+}
+
+impl<'b, 'a> IntoIterator for &'b ParamBuf<'a> {
+    type Item = &'a [u8];
+    type IntoIter = Map<std::slice::Iter<'a, Vec<u8>>, fn(&Vec<u8>) -> &[u8]>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.params.iter().map(|p| p.as_slice())
+    }
+}
+
+impl<'a> ParamBuf<'a> {
+    pub fn len(&self) -> usize {
+        self.params.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.params.is_empty()
+    }
+
+    pub fn to_owned(&self) -> ParamBufOwned {
+        ParamBufOwned {
+            params: self.params.iter().map(|p| p.to_vec()).collect(),
+        }
+    }
+}
+
 pub enum VTEvent<'a> {
     // Plain printable text from GROUND (coalesced)
     Raw(&'a [u8]),
@@ -93,7 +131,7 @@ pub enum VTEvent<'a> {
     // CSI short escape
     Csi {
         private: Option<u8>,
-        params: smallvec::SmallVec<[&'a [u8]; 4]>,
+        params: ParamBuf<'a>,
         intermediates: VTIntermediate,
         final_byte: u8,
     },
@@ -107,7 +145,7 @@ pub enum VTEvent<'a> {
     // DCS stream
     DcsStart {
         priv_prefix: Option<u8>,
-        params: smallvec::SmallVec<[&'a [u8]; 4]>,
+        params: ParamBuf<'a>,
         intermediates: VTIntermediate,
         final_byte: u8,
     },
@@ -126,8 +164,9 @@ pub enum VTEvent<'a> {
 
 impl<'a> std::fmt::Debug for VTEvent<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use VTEvent::*;
         match self {
-            VTEvent::Raw(s) => {
+            Raw(s) => {
                 write!(f, "Raw('")?;
                 for chunk in s.utf8_chunks() {
                     for c in chunk.valid().chars() {
@@ -144,8 +183,8 @@ impl<'a> std::fmt::Debug for VTEvent<'a> {
                 write!(f, "')")?;
                 Ok(())
             }
-            VTEvent::C0(b) => write!(f, "C0({:02x})", b),
-            VTEvent::Esc {
+            C0(b) => write!(f, "C0({:02x})", b),
+            Esc {
                 intermediates,
                 final_byte,
             } => {
@@ -153,7 +192,7 @@ impl<'a> std::fmt::Debug for VTEvent<'a> {
                 write!(f, ", {})", *final_byte as char)?;
                 Ok(())
             }
-            VTEvent::Csi {
+            Csi {
                 private,
                 params,
                 intermediates,
@@ -177,7 +216,7 @@ impl<'a> std::fmt::Debug for VTEvent<'a> {
                 write!(f, ", {:?})", *final_byte as char)?;
                 Ok(())
             }
-            VTEvent::Ss3 {
+            Ss3 {
                 intermediates,
                 final_byte,
             } => {
@@ -186,7 +225,7 @@ impl<'a> std::fmt::Debug for VTEvent<'a> {
                 write!(f, ", {})", *final_byte as char)?;
                 Ok(())
             }
-            VTEvent::DcsStart {
+            DcsStart {
                 priv_prefix,
                 params,
                 intermediates,
@@ -210,7 +249,7 @@ impl<'a> std::fmt::Debug for VTEvent<'a> {
                 write!(f, ", {})", *final_byte as char)?;
                 Ok(())
             }
-            VTEvent::DcsData(s) => {
+            DcsData(s) => {
                 write!(f, "DcsData('")?;
                 for chunk in s.utf8_chunks() {
                     for c in chunk.valid().chars() {
@@ -227,10 +266,10 @@ impl<'a> std::fmt::Debug for VTEvent<'a> {
                 write!(f, "')")?;
                 Ok(())
             }
-            VTEvent::DcsEnd => write!(f, "DcsEnd"),
-            VTEvent::DcsCancel => write!(f, "DcsCancel"),
-            VTEvent::OscStart => write!(f, "OscStart"),
-            VTEvent::OscData(s) => {
+            DcsEnd => write!(f, "DcsEnd"),
+            DcsCancel => write!(f, "DcsCancel"),
+            OscStart => write!(f, "OscStart"),
+            OscData(s) => {
                 write!(f, "OscData('")?;
                 for chunk in s.utf8_chunks() {
                     for c in chunk.valid().chars() {
@@ -247,11 +286,198 @@ impl<'a> std::fmt::Debug for VTEvent<'a> {
                 write!(f, "')")?;
                 Ok(())
             }
-            VTEvent::OscEnd { .. } => {
+            OscEnd { .. } => {
                 write!(f, "OscEnd")?;
                 Ok(())
             }
-            VTEvent::OscCancel => write!(f, "OscCancel"),
+            OscCancel => write!(f, "OscCancel"),
+        }
+    }
+}
+
+impl<'a> VTEvent<'a> {
+    pub fn to_owned(&self) -> VTOwnedEvent {
+        use VTEvent::*;
+        match self {
+            Raw(s) => VTOwnedEvent::Raw(s.to_vec()),
+            C0(b) => VTOwnedEvent::C0(*b),
+            Esc {
+                intermediates,
+                final_byte,
+            } => VTOwnedEvent::Esc {
+                intermediates: intermediates.clone(),
+                final_byte: *final_byte,
+            },
+            Csi {
+                private,
+                params,
+                intermediates,
+                final_byte,
+            } => VTOwnedEvent::Csi {
+                private: private.clone(),
+                params: params.to_owned(),
+                intermediates: intermediates.clone(),
+                final_byte: *final_byte,
+            },
+            Ss3 {
+                intermediates,
+                final_byte,
+            } => VTOwnedEvent::Ss3 {
+                intermediates: intermediates.clone(),
+                final_byte: *final_byte,
+            },
+            DcsStart {
+                priv_prefix,
+                params,
+                intermediates,
+                final_byte,
+            } => VTOwnedEvent::DcsStart {
+                priv_prefix: priv_prefix.clone(),
+                params: params.to_owned(),
+                intermediates: intermediates.clone(),
+                final_byte: *final_byte,
+            },
+            DcsData(s) => VTOwnedEvent::DcsData(s.to_vec()),
+            DcsEnd => VTOwnedEvent::DcsEnd,
+            DcsCancel => VTOwnedEvent::DcsCancel,
+            OscStart => VTOwnedEvent::OscStart,
+            OscData(s) => VTOwnedEvent::OscData(s.to_vec()),
+            OscEnd { used_bel } => VTOwnedEvent::OscEnd {
+                used_bel: *used_bel,
+            },
+            OscCancel => VTOwnedEvent::OscCancel,
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct ParamBufOwned {
+    pub(crate) params: Vec<Vec<u8>>,
+}
+
+impl IntoIterator for ParamBufOwned {
+    type Item = Vec<u8>;
+    type IntoIter = std::vec::IntoIter<Vec<u8>>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.params.into_iter()
+    }
+}
+
+impl<'b> IntoIterator for &'b ParamBufOwned {
+    type Item = &'b [u8];
+    type IntoIter = Map<std::slice::Iter<'b, Vec<u8>>, fn(&Vec<u8>) -> &[u8]>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.params.iter().map(|p| p.as_slice())
+    }
+}
+
+impl ParamBufOwned {
+    pub fn len(&self) -> usize {
+        self.params.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.params.is_empty()
+    }
+
+    pub fn borrow(&self) -> ParamBuf<'_> {
+        ParamBuf {
+            params: &self.params,
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub enum VTOwnedEvent {
+    Raw(Vec<u8>),
+    C0(u8),
+    Esc {
+        intermediates: VTIntermediate,
+        final_byte: u8,
+    },
+    Csi {
+        private: Option<u8>,
+        params: ParamBufOwned,
+        intermediates: VTIntermediate,
+        final_byte: u8,
+    },
+    Ss3 {
+        intermediates: VTIntermediate,
+        final_byte: u8,
+    },
+    DcsStart {
+        priv_prefix: Option<u8>,
+        params: ParamBufOwned,
+        intermediates: VTIntermediate,
+        final_byte: u8,
+    },
+    DcsData(Vec<u8>),
+    DcsEnd,
+    DcsCancel,
+    OscStart,
+    OscData(Vec<u8>),
+    OscEnd {
+        used_bel: bool,
+    },
+    OscCancel,
+}
+
+impl std::fmt::Debug for VTOwnedEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.borrow().fmt(f)
+    }
+}
+
+impl VTOwnedEvent {
+    pub fn borrow(&self) -> VTEvent<'_> {
+        match self {
+            VTOwnedEvent::Raw(s) => VTEvent::Raw(s),
+            VTOwnedEvent::C0(b) => VTEvent::C0(*b),
+            VTOwnedEvent::Esc {
+                intermediates,
+                final_byte,
+            } => VTEvent::Esc {
+                intermediates: intermediates.clone(),
+                final_byte: *final_byte,
+            },
+            VTOwnedEvent::Csi {
+                private,
+                params,
+                intermediates,
+                final_byte,
+            } => VTEvent::Csi {
+                private: private.clone(),
+                params: params.borrow(),
+                intermediates: intermediates.clone(),
+                final_byte: *final_byte,
+            },
+            VTOwnedEvent::Ss3 {
+                intermediates,
+                final_byte,
+            } => VTEvent::Ss3 {
+                intermediates: intermediates.clone(),
+                final_byte: *final_byte,
+            },
+            VTOwnedEvent::DcsStart {
+                priv_prefix,
+                params,
+                intermediates,
+                final_byte,
+            } => VTEvent::DcsStart {
+                priv_prefix: priv_prefix.clone(),
+                params: params.borrow(),
+                intermediates: intermediates.clone(),
+                final_byte: *final_byte,
+            },
+            VTOwnedEvent::DcsData(s) => VTEvent::DcsData(s),
+            VTOwnedEvent::DcsEnd => VTEvent::DcsEnd,
+            VTOwnedEvent::DcsCancel => VTEvent::DcsCancel,
+            VTOwnedEvent::OscStart => VTEvent::OscStart,
+            VTOwnedEvent::OscData(s) => VTEvent::OscData(s),
+            VTOwnedEvent::OscEnd { used_bel } => VTEvent::OscEnd {
+                used_bel: *used_bel,
+            },
+            VTOwnedEvent::OscCancel => VTEvent::OscCancel,
         }
     }
 }

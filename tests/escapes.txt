@@ -9,7 +9,7 @@
 
 # Raw text with line feed control character
 Hello<LF>World
-# Raw text with delete character (should be ignored)
+# Raw text with delete character
 Hello<DEL>World
 
 # CSI: Cursor down with parameters 1,2,3
@@ -42,6 +42,9 @@ Hello<DEL>World
 # SS3: Single shift 3 with final A (arrow key)
 <ESC>OA
 
+# DCS: CSI payload
+<ESC>Pq<ESC>[38:2:12:34:56m<ESC>\
+
 # DCS: Device control string with colon parameter (invalid/DCS_IGNORE) cancelled by CAN
 <ESC>P:1;2;3|data<CAN>Hello
 # DCS: Device control string with colon parameter (invalid/DCS_IGNORE) cancelled by SUB
@@ -70,8 +73,13 @@ x<ESC>[:1;2;3gy
 
 # ESC ESC: Double escape followed by CSI cursor down
 <ESC><ESC>[1;2;3d
-# DCS: Device control string with escaped ESC in payload
+# DCS: Device control string with double ESC in payload
 <ESC>P 1;2;3|<ESC><ESC>data<ESC>\
+# DCS: Device control string with ESC before ending
+<ESC>P 1;2;3|<ESC><ESC>\
+# DCS: Device control string with double ESC before ending
+<ESC>P 1;2;3|<ESC><ESC><ESC>\
+
 # CSI: Graphics mode with DEL character in parameters
 <ESC>[1;2;3<DEL>m
 

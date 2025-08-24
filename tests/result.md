@@ -58,13 +58,15 @@ C0(0a)
 Raw('World')
 ```
 ---
-## Raw text with delete character (should be ignored)
+## Raw text with delete character
 ```
 Hello<DEL>World
 ```
 
 ```
-Raw('HelloWorld')
+Raw('Hello')
+C0(7f)
+Raw('World')
 ```
 ---
 ## CSI: Cursor down with parameters 1,2,3
@@ -207,6 +209,17 @@ Esc('', O)
 Raw('A')
 ```
 ---
+## DCS: CSI payload
+```
+<ESC>Pq<ESC>[38:2:12:34:56m<ESC>\
+```
+
+```
+DcsStart(, '', q)
+DcsData('<ESC>[38:2:12:34:56m')
+DcsEnd
+```
+---
 ## DCS: Device control string with colon parameter (invalid/DCS_IGNORE) cancelled by CAN
 ```
 <ESC>P:1;2;3|data<CAN>Hello
@@ -324,14 +337,36 @@ Raw('y')
 Csi(, '1', '2', '3', '', 'd')
 ```
 ---
-## DCS: Device control string with escaped ESC in payload
+## DCS: Device control string with double ESC in payload
 ```
 <ESC>P 1;2;3|<ESC><ESC>data<ESC>\
 ```
 
 ```
 DcsStart(, ' ', 1)
-DcsData(';2;3|<ESC>data')
+DcsData(';2;3|<ESC><ESC>data')
+DcsEnd
+```
+---
+## DCS: Device control string with ESC before ending
+```
+<ESC>P 1;2;3|<ESC><ESC>\
+```
+
+```
+DcsStart(, ' ', 1)
+DcsData(';2;3|<ESC>')
+DcsEnd
+```
+---
+## DCS: Device control string with double ESC before ending
+```
+<ESC>P 1;2;3|<ESC><ESC><ESC>\
+```
+
+```
+DcsStart(, ' ', 1)
+DcsData(';2;3|<ESC><ESC>')
 DcsEnd
 ```
 ---

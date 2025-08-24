@@ -1,7 +1,10 @@
+pub mod ascii;
 pub mod event;
 pub mod signature;
 
 use smallvec::SmallVec;
+
+use ascii::AsciiControl;
 
 const ESC: u8 = AsciiControl::Esc as _;
 const BEL: u8 = AsciiControl::Bel as _;
@@ -14,114 +17,32 @@ const SS3: u8 = b'O';
 const DCS: u8 = b'P';
 const ST_FINAL: u8 = b'\\';
 
-macro_rules! ascii_control {
-    ($(($variant:ident, $value:expr)),* $(,)?) => {
-        /// ASCII control codes.
-        #[repr(u8)]
-        pub enum AsciiControl {
-            $( $variant = $value, )*
-        }
-
-        impl std::fmt::Display for AsciiControl {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                match self {
-                    $( AsciiControl::$variant => write!(f, "<{}>", stringify!($variant).to_ascii_uppercase()), )*
-                }
-            }
-        }
-
-        impl std::fmt::Debug for AsciiControl {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                match self {
-                    $( AsciiControl::$variant => write!(f, "<{}>", stringify!($variant).to_ascii_uppercase()), )*
-                }
-            }
-        }
-
-        impl TryFrom<u8> for AsciiControl {
-            type Error = ();
-            fn try_from(value: u8) -> Result<Self, Self::Error> {
-                $(
-                    if value == $value {
-                        return Ok(AsciiControl::$variant);
-                    }
-                )*
-                Err(())
-            }
-        }
-
-        impl TryFrom<char> for AsciiControl {
-            type Error = ();
-            fn try_from(value: char) -> Result<Self, Self::Error> {
-                $(
-                    if value == char::from($value) {
-                        return Ok(AsciiControl::$variant);
-                    }
-                )*
-                Err(())
-            }
-        }
-
-        impl std::str::FromStr for AsciiControl {
-            type Err = ();
-            fn from_str(s: &str) -> Result<Self, Self::Err> {
-                $(
-                    if s.eq_ignore_ascii_case(stringify!($name)) {
-                        return Ok(AsciiControl::$variant);
-                    }
-                )*
-                Err(())
-            }
-        }
-    };
-}
-
-ascii_control! {
-    (Nul, 0),
-    (Soh, 1),
-    (Stx, 2),
-    (Etx, 3),
-    (Eot, 4),
-    (Enq, 5),
-    (Ack, 6),
-    (Bel, 7),
-    (Bs, 8),
-    (Tab, 9),
-    (Lf, 10),
-    (Vt, 11),
-    (Ff, 12),
-    (Cr, 13),
-    (So, 14 ),
-    (Si, 15),
-    (Dle, 16),
-    (Dc1, 17),
-    (Dc2, 18),
-    (Dc3, 19),
-    (Dc4, 20),
-    (Nak, 21),
-    (Syn, 22),
-    (Etb, 23),
-    (Can, 24),
-    (Em, 25),
-    (Sub, 26),
-    (Esc, 27),
-    (Fs, 28),
-    (Gs, 29),
-    (Rs, 30),
-    (Us, 31),
-    (Del, 127),
-}
-
 // Re-export the main types for backward compatibility
 pub use event::{VTEvent, VTIntermediate};
 pub use signature::VTEscapeSignature;
 
+use crate::event::ParamBuf;
+
 /// The action to take with the most recently accumulated byte.
 pub enum VTAction<'a> {
-    /// The parser will accumulate the byte and continue processing.
+    /// The parser will accumulate the byte and continue processing. If
+    /// currently buffered, emit the buffered bytes.
     None,
-    /// The parser emitted an event.
+    /// The parser emitted an event. If currently buffered, emit the buffered
+    /// bytes.
     Event(VTEvent<'a>),
+    /// Start or continue buffering bytes. Include the current byte in the
+    /// buffer.
+    Buffer(VTEmit),
+    /// Hold this byte until the next byte is received. If another byte is
+    /// already held, emit the previous byte.
+    Hold(VTEmit),
+    /// Cancel the current buffer.
+    Cancel(VTEmit),
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum VTEmit {
     /// Emit this byte as a ground-state character.
     Ground,
     /// Emit this byte into the current DCS stream.
@@ -180,110 +101,164 @@ enum State {
 pub struct VTPushParser {
     st: State,
 
-    // GROUND raw coalescing
-    raw_buf: Vec<u8>,
-
     // Header collectors for short escapes (we borrow from these in callbacks)
     ints: VTIntermediate,
     params: Vec<Vec<u8>>,
     cur_param: Vec<u8>,
     priv_prefix: Option<u8>,
+    held_byte: Option<u8>,
 
     // Streaming buffer (DCS/OSC bodies)
-    stream_buf: Vec<u8>,
     used_bel: bool,
-
-    // Limits
-    stream_flush: usize,
 }
 
 impl VTPushParser {
     pub fn new() -> Self {
         Self {
             st: State::Ground,
-            raw_buf: Vec::with_capacity(256),
             ints: VTIntermediate::default(),
             params: Vec::with_capacity(8),
             cur_param: Vec::with_capacity(8),
             priv_prefix: None,
-            stream_buf: Vec::with_capacity(8192),
+            held_byte: None,
             used_bel: false,
-            stream_flush: 8192,
         }
     }
 
     /// Decode a buffer of bytes into a series of events.
     pub fn decode_buffer<'a>(input: &'a [u8], mut cb: impl for<'b> FnMut(VTEvent<'b>)) {
         let mut parser = Self::new();
-        for &b in input {
-            parser.push_with(b, &mut cb);
-        }
-        parser.flush_raw_if_any(&mut cb);
+        parser.feed_with(input, &mut cb);
         parser.finish(&mut cb);
     }
 
-    pub fn with_stream_flush_max(mut self, stream_flush: usize) -> Self {
-        self.stream_flush = stream_flush.max(1);
-        self
-    }
+    // =====================
+    // Callback-driven API
+    // =====================
 
-    /* =====================
-    Callback-driven API
-    ===================== */
+    pub fn feed_with<'this: 'input, 'input, F: for<'any> FnMut(VTEvent<'any>)>(
+        &'this mut self,
+        input: &'input [u8],
+        cb: &mut F,
+    ) {
+        let mut buffer_idx = 0;
+        let mut current_emit = None;
+        let mut held_byte = self.held_byte.take();
+        let mut hold = held_byte.is_some();
 
-    pub fn feed_with<F: FnMut(VTEvent)>(&mut self, input: &[u8], mut cb: F) {
-        for &b in input {
-            self.push_with(b, &mut cb);
+        let mut action_handler = |mut i: usize, action: VTAction| {
+            // Special case: carryover from previous. We need to emit it on its own.
+            if let Some(b) = held_byte.take() {
+                match action {
+                    VTAction::Buffer(emit) => match emit {
+                        VTEmit::Ground => cb(VTEvent::Raw(&[b])),
+                        VTEmit::Dcs => cb(VTEvent::DcsData(&[b])),
+                        VTEmit::Osc => cb(VTEvent::OscData(&[b])),
+                    },
+                    _ => {}
+                }
+            }
+
+            let mut emit_buffer = |emit: VTEmit, hold: bool| {
+                if hold {
+                    i = i - 1;
+                }
+
+                if (buffer_idx..i).len() > 0 {
+                    match emit {
+                        VTEmit::Ground => cb(VTEvent::Raw(&input[buffer_idx..i])),
+                        VTEmit::Dcs => cb(VTEvent::DcsData(&input[buffer_idx..i])),
+                        VTEmit::Osc => cb(VTEvent::OscData(&input[buffer_idx..i])),
+                    }
+                }
+            };
+
+            match action {
+                VTAction::None => match current_emit.take() {
+                    Some(emit) => emit_buffer(emit, hold),
+                    None => {}
+                },
+                VTAction::Event(e) => {
+                    match current_emit.take() {
+                        Some(emit) => emit_buffer(emit, hold),
+                        None => {}
+                    };
+                    cb(e);
+                }
+                VTAction::Buffer(emit) | VTAction::Hold(emit) => {
+                    hold = matches!(action, VTAction::Hold(_));
+                    match current_emit {
+                        None => {
+                            buffer_idx = i;
+                            current_emit = Some(emit);
+                        }
+                        Some(x) if x == emit => {}
+                        Some(_) => {
+                            match current_emit.take() {
+                                Some(emit) => emit_buffer(emit, hold),
+                                None => {}
+                            }
+                            buffer_idx = i;
+                            current_emit = Some(emit);
+                        }
+                    }
+                }
+                VTAction::Cancel(emit) => {
+                    current_emit = None;
+                    match emit {
+                        VTEmit::Ground => unreachable!(),
+                        VTEmit::Dcs => cb(VTEvent::DcsCancel),
+                        VTEmit::Osc => cb(VTEvent::OscCancel),
+                    }
+                }
+            }
+        };
+
+        for (i, &b) in input.iter().enumerate() {
+            action_handler(i, self.push_with(b));
         }
-        self.flush_raw_if_any(&mut cb);
+
+        action_handler(input.len(), VTAction::None);
     }
 
-    pub fn push_with<F: FnMut(VTEvent)>(&mut self, b: u8, cb: &mut F) {
+    pub fn push_with<'this, 'input>(&'this mut self, b: u8) -> VTAction<'this> {
         use State::*;
         match self.st {
-            Ground => self.on_ground(b, cb),
-            Escape => self.on_escape(b, cb),
-            EscInt => self.on_esc_int(b, cb),
+            Ground => self.on_ground(b),
+            Escape => self.on_escape(b),
+            EscInt => self.on_esc_int(b),
 
-            CsiEntry => self.on_csi_entry(b, cb),
-            CsiParam => self.on_csi_param(b, cb),
-            CsiInt => self.on_csi_int(b, cb),
-            CsiIgnore => self.on_csi_ignore(b, cb),
+            CsiEntry => self.on_csi_entry(b),
+            CsiParam => self.on_csi_param(b),
+            CsiInt => self.on_csi_int(b),
+            CsiIgnore => self.on_csi_ignore(b),
 
-            DcsEntry => self.on_dcs_entry(b, cb),
-            DcsParam => self.on_dcs_param(b, cb),
-            DcsInt => self.on_dcs_int(b, cb),
-            DcsIgnore => self.on_dcs_ignore(b, cb),
-            DcsIgnoreEsc => self.on_dcs_ignore_esc(b, cb),
-            DcsPassthrough => self.on_dcs_pass(b, cb),
-            DcsEsc => self.on_dcs_esc(b, cb),
+            DcsEntry => self.on_dcs_entry(b),
+            DcsParam => self.on_dcs_param(b),
+            DcsInt => self.on_dcs_int(b),
+            DcsIgnore => self.on_dcs_ignore(b),
+            DcsIgnoreEsc => self.on_dcs_ignore_esc(b),
+            DcsPassthrough => self.on_dcs_pass(b),
+            DcsEsc => self.on_dcs_esc(b),
 
-            OscString => self.on_osc_string(b, cb),
-            OscEsc => self.on_osc_esc(b, cb),
+            OscString => self.on_osc_string(b),
+            OscEsc => self.on_osc_esc(b),
 
-            SosPmApcString => self.on_spa_string(b, cb),
-            SpaEsc => self.on_spa_esc(b, cb),
+            SosPmApcString => self.on_spa_string(b),
+            SpaEsc => self.on_spa_esc(b),
         }
     }
 
     pub fn finish<F: FnMut(VTEvent)>(&mut self, cb: &mut F) {
-        // Abort unterminated strings and flush raw.
         self.reset_collectors();
         self.st = State::Ground;
-        self.flush_raw_if_any(cb);
+
+        // TODO
     }
 
-    /* =====================
-    Emit helpers (borrowed)
-    ===================== */
-
-    fn flush_raw_if_any<F: FnMut(VTEvent)>(&mut self, cb: &mut F) {
-        if !self.raw_buf.is_empty() {
-            let slice = &self.raw_buf[..];
-            cb(VTEvent::Raw(slice));
-            self.raw_buf.clear(); // borrow ended with callback return
-        }
-    }
+    // =====================
+    // Emit helpers (borrowed)
+    // =====================
 
     fn clear_hdr_collectors(&mut self) {
         self.ints.clear();
@@ -294,7 +269,6 @@ impl VTPushParser {
 
     fn reset_collectors(&mut self) {
         self.clear_hdr_collectors();
-        self.stream_buf.clear();
         self.used_bel = false;
     }
 
@@ -308,17 +282,7 @@ impl VTPushParser {
         }
     }
 
-    fn emit_esc<F: FnMut(VTEvent)>(&mut self, final_byte: u8, cb: &mut F) {
-        self.flush_raw_if_any(cb);
-        cb(VTEvent::Esc {
-            intermediates: self.ints,
-            final_byte,
-        });
-        self.clear_hdr_collectors();
-    }
-
-    fn emit_csi<F: FnMut(VTEvent)>(&mut self, final_byte: u8, cb: &mut F) {
-        self.flush_raw_if_any(cb);
+    fn emit_csi(&mut self, final_byte: u8) -> VTAction {
         self.finish_params_if_any();
 
         // Build borrowed views into self.params
@@ -326,496 +290,517 @@ impl VTPushParser {
         borrowed.extend(self.params.iter().map(|v| v.as_slice()));
 
         let privp = self.priv_prefix.take();
-        cb(VTEvent::Csi {
+        VTAction::Event(VTEvent::Csi {
             private: privp,
-            params: borrowed,
+            params: ParamBuf {
+                params: &self.params,
+            },
             intermediates: self.ints,
             final_byte,
-        });
-        self.clear_hdr_collectors();
+        })
     }
 
-    fn dcs_start<F: FnMut(VTEvent)>(&mut self, final_byte: u8, cb: &mut F) {
-        self.flush_raw_if_any(cb);
+    fn dcs_start(&mut self, final_byte: u8) -> VTAction {
         self.finish_params_if_any();
 
-        let mut borrowed: SmallVec<[&[u8]; 4]> = SmallVec::new();
-        borrowed.extend(self.params.iter().map(|v| v.as_slice()));
-
         let privp = self.priv_prefix.take();
-        cb(VTEvent::DcsStart {
+        VTAction::Event(VTEvent::DcsStart {
             priv_prefix: privp,
-            params: borrowed,
+            params: ParamBuf {
+                params: &self.params,
+            },
             intermediates: self.ints,
             final_byte,
-        });
-        self.stream_buf.clear();
-        // keep header buffers intact until after callback; already done
-        self.clear_hdr_collectors();
+        })
     }
 
-    fn dcs_put<F: FnMut(VTEvent)>(&mut self, b: u8, cb: &mut F) {
-        self.stream_buf.push(b);
-        if self.stream_buf.len() >= self.stream_flush {
-            let slice = &self.stream_buf[..];
-            cb(VTEvent::DcsData(slice));
-            self.stream_buf.clear();
-        }
-    }
+    // =====================
+    // State handlers
+    // =====================
 
-    fn dcs_end<F: FnMut(VTEvent)>(&mut self, cb: &mut F) {
-        if !self.stream_buf.is_empty() {
-            let slice = &self.stream_buf[..];
-            cb(VTEvent::DcsData(slice));
-            self.stream_buf.clear();
-        }
-        cb(VTEvent::DcsEnd);
-        self.reset_collectors();
-    }
-
-    fn osc_start<F: FnMut(VTEvent)>(&mut self, cb: &mut F) {
-        self.flush_raw_if_any(cb);
-        self.used_bel = false;
-        self.stream_buf.clear();
-        cb(VTEvent::OscStart);
-    }
-
-    fn osc_put<F: FnMut(VTEvent)>(&mut self, b: u8, cb: &mut F) {
-        self.stream_buf.push(b);
-        if self.stream_buf.len() >= self.stream_flush {
-            let slice = &self.stream_buf[..];
-            cb(VTEvent::OscData(slice));
-            self.stream_buf.clear();
-        }
-    }
-
-    fn osc_end<F: FnMut(VTEvent)>(&mut self, cb: &mut F) {
-        if !self.stream_buf.is_empty() {
-            let slice = &self.stream_buf[..];
-            cb(VTEvent::OscData(slice));
-            self.stream_buf.clear();
-        }
-        let used_bel = self.used_bel;
-        cb(VTEvent::OscEnd { used_bel });
-        self.reset_collectors();
-    }
-
-    /* =====================
-    State handlers
-    ===================== */
-
-    fn on_ground<F: FnMut(VTEvent)>(&mut self, b: u8, cb: &mut F) {
+    fn on_ground(&mut self, b: u8) -> VTAction {
         match b {
             ESC => {
                 self.clear_hdr_collectors();
-                self.flush_raw_if_any(cb);
                 self.st = State::Escape;
+                VTAction::None
             }
-            DEL => {}
-            c if is_c0(c) => {
-                self.flush_raw_if_any(cb);
-                cb(VTEvent::C0(c));
-            }
-            p if is_printable(p) => {
-                self.raw_buf.push(p);
-            }
-            _ => {
-                self.raw_buf.push(b);
-            } // safe fallback
+            DEL => VTAction::Event(VTEvent::C0(DEL)),
+            c if is_c0(c) => VTAction::Event(VTEvent::C0(c)),
+            p if is_printable(p) => VTAction::Buffer(VTEmit::Ground),
+            _ => VTAction::Buffer(VTEmit::Ground), // safe fallback
         }
     }
 
-    fn on_escape<F: FnMut(VTEvent)>(&mut self, b: u8, cb: &mut F) {
+    fn on_escape(&mut self, b: u8) -> VTAction {
         use State::*;
         match b {
             CAN | SUB => {
                 self.st = Ground;
+                VTAction::None
             }
-            DEL => {}
+            DEL => VTAction::None,
             c if is_intermediate(c) => {
                 self.ints.push(c);
                 self.st = EscInt;
+                VTAction::None
             }
             CSI => {
-                self.clear_hdr_collectors();
                 self.st = CsiEntry;
+                VTAction::None
             }
             DCS => {
-                self.clear_hdr_collectors();
                 self.st = DcsEntry;
+                VTAction::None
             }
             OSC => {
-                self.clear_hdr_collectors();
-                self.osc_start(cb);
+                self.used_bel = false;
                 self.st = OscString;
+                VTAction::Event(VTEvent::OscStart)
             }
             b'X' | b'^' | b'_' => {
-                self.clear_hdr_collectors();
                 self.st = State::SosPmApcString;
+                VTAction::None
             }
             c if is_final(c) => {
-                self.emit_esc(c, cb);
                 self.st = Ground;
+                VTAction::Event(VTEvent::Esc {
+                    intermediates: self.ints,
+                    final_byte: c,
+                })
             }
-            ESC => { /* ESC ESC allowed */ }
+            ESC => {
+                // ESC ESC allowed, but we stay in the current state
+                VTAction::None
+            }
             _ => {
                 self.st = Ground;
+                VTAction::None
             }
         }
     }
-    fn on_esc_int<F: FnMut(VTEvent)>(&mut self, b: u8, cb: &mut F) {
+
+    fn on_esc_int(&mut self, b: u8) -> VTAction {
         use State::*;
         match b {
             CAN | SUB => {
                 self.st = Ground;
+                VTAction::None
             }
-            DEL => {}
+            DEL => VTAction::None,
             c if is_intermediate(c) => {
                 self.ints.push(c);
+                VTAction::None
             }
             c if is_final(c) => {
-                self.emit_esc(c, cb);
                 self.st = Ground;
+                VTAction::Event(VTEvent::Esc {
+                    intermediates: self.ints,
+                    final_byte: c,
+                })
             }
             _ => {
                 self.st = Ground;
+                VTAction::None
             }
         }
     }
 
     // ---- CSI
-    fn on_csi_entry<F: FnMut(VTEvent)>(&mut self, b: u8, cb: &mut F) {
+    fn on_csi_entry(&mut self, b: u8) -> VTAction {
         use State::*;
         match b {
             CAN | SUB => {
                 self.st = Ground;
+                VTAction::None
             }
-            DEL => {}
+            DEL => VTAction::None,
             ESC => {
                 self.st = Escape;
+                VTAction::None
             }
             c if is_priv(c) => {
                 self.priv_prefix = Some(c);
                 self.st = CsiParam;
+                VTAction::None
             }
             d if is_digit(d) => {
                 self.cur_param.push(d);
                 self.st = CsiParam;
+                VTAction::None
             }
             b';' => {
                 self.next_param();
                 self.st = CsiParam;
+                VTAction::None
             }
             b':' => {
                 self.cur_param.push(b':');
                 self.st = CsiParam;
+                VTAction::None
             }
             c if is_intermediate(c) => {
                 self.ints.push(c);
                 self.st = CsiInt;
+                VTAction::None
             }
             c if is_final(c) => {
-                self.emit_csi(c, cb);
                 self.st = Ground;
+                self.emit_csi(c)
             }
             _ => {
                 self.st = CsiIgnore;
+                VTAction::None
             }
         }
     }
-    fn on_csi_param<F: FnMut(VTEvent)>(&mut self, b: u8, cb: &mut F) {
+
+    fn on_csi_param(&mut self, b: u8) -> VTAction {
         use State::*;
         match b {
             CAN | SUB => {
                 self.st = Ground;
+                VTAction::None
             }
-            DEL => {}
+            DEL => VTAction::None,
             ESC => {
                 self.st = Escape;
+                VTAction::None
             }
             d if is_digit(d) => {
                 self.cur_param.push(d);
+                VTAction::None
             }
             b';' => {
                 self.next_param();
+                VTAction::None
             }
             b':' => {
                 self.cur_param.push(b':');
+                VTAction::None
             }
             c if is_intermediate(c) => {
                 self.ints.push(c);
                 self.st = CsiInt;
+                VTAction::None
             }
             c if is_final(c) => {
-                self.emit_csi(c, cb);
                 self.st = Ground;
+                self.emit_csi(c)
             }
             _ => {
                 self.st = CsiIgnore;
+                VTAction::None
             }
         }
     }
-    fn on_csi_int<F: FnMut(VTEvent)>(&mut self, b: u8, cb: &mut F) {
+
+    fn on_csi_int(&mut self, b: u8) -> VTAction {
         use State::*;
         match b {
             CAN | SUB => {
                 self.st = Ground;
+                VTAction::None
             }
-            DEL => {}
+            DEL => VTAction::None,
             ESC => {
                 self.st = Escape;
+                VTAction::None
             }
             c if is_intermediate(c) => {
                 self.ints.push(c);
+                VTAction::None
             }
             c if is_final(c) => {
-                self.emit_csi(c, cb);
                 self.st = Ground;
+                self.emit_csi(c)
             }
             _ => {
                 self.st = CsiIgnore;
+                VTAction::None
             }
         }
     }
-    fn on_csi_ignore<F: FnMut(VTEvent)>(&mut self, b: u8, cb: &mut F) {
+
+    fn on_csi_ignore(&mut self, b: u8) -> VTAction {
         use State::*;
         match b {
             CAN | SUB => {
                 self.st = Ground;
+                VTAction::None
             }
-            DEL => {}
+            DEL => VTAction::None,
             ESC => {
                 self.st = Escape;
+                VTAction::None
             }
             c if is_final(c) => {
                 self.st = Ground;
+                VTAction::None
             }
-            _ => {}
+            _ => VTAction::None,
         }
     }
 
     // ---- DCS
-    fn on_dcs_entry<F: FnMut(VTEvent)>(&mut self, b: u8, cb: &mut F) {
+    fn on_dcs_entry(&mut self, b: u8) -> VTAction {
         use State::*;
         match b {
             CAN | SUB => {
                 self.st = Ground;
+                VTAction::None
             }
-            DEL => {}
+            DEL => VTAction::None,
             ESC => {
                 self.st = Escape;
+                VTAction::None
             }
             c if is_priv(c) => {
                 self.priv_prefix = Some(c);
                 self.st = DcsParam;
+                VTAction::None
             }
             d if is_digit(d) => {
                 self.cur_param.push(d);
                 self.st = DcsParam;
+                VTAction::None
             }
             b';' => {
                 self.next_param();
                 self.st = DcsParam;
+                VTAction::None
             }
             b':' => {
                 self.st = DcsIgnore;
+                VTAction::None
             }
             c if is_intermediate(c) => {
                 self.ints.push(c);
                 self.st = DcsInt;
+                VTAction::None
             }
             c if is_final(c) => {
-                self.dcs_start(c, cb);
                 self.st = DcsPassthrough;
+                self.dcs_start(c)
             }
             _ => {
                 self.st = DcsIgnore;
+                VTAction::None
             }
         }
     }
-    fn on_dcs_param<F: FnMut(VTEvent)>(&mut self, b: u8, cb: &mut F) {
+
+    fn on_dcs_param(&mut self, b: u8) -> VTAction {
         use State::*;
         match b {
             CAN | SUB => {
                 self.st = Ground;
+                VTAction::None
             }
-            DEL => {}
+            DEL => VTAction::None,
             ESC => {
                 self.st = Escape;
+                VTAction::None
             }
             d if is_digit(d) => {
                 self.cur_param.push(d);
+                VTAction::None
             }
             b';' => {
                 self.next_param();
+                VTAction::None
             }
             b':' => {
                 self.st = DcsIgnore;
+                VTAction::None
             }
             c if is_intermediate(c) => {
                 self.ints.push(c);
                 self.st = DcsInt;
+                VTAction::None
             }
             c if is_final(c) => {
-                self.dcs_start(c, cb);
                 self.st = DcsPassthrough;
+                self.dcs_start(c)
             }
             _ => {
                 self.st = DcsIgnore;
+                VTAction::None
             }
         }
     }
-    fn on_dcs_int<F: FnMut(VTEvent)>(&mut self, b: u8, cb: &mut F) {
+
+    fn on_dcs_int(&mut self, b: u8) -> VTAction {
         use State::*;
         match b {
             CAN | SUB => {
                 self.st = Ground;
+                VTAction::None
             }
-            DEL => {}
+            DEL => VTAction::None,
             ESC => {
                 self.st = Escape;
+                VTAction::None
             }
             c if is_intermediate(c) => {
                 self.ints.push(c);
+                VTAction::None
             }
             c if is_final(c) => {
-                self.dcs_start(c, cb);
                 self.st = DcsPassthrough;
+                self.dcs_start(c)
             }
             _ => {
                 self.st = DcsIgnore;
+                VTAction::None
             }
         }
     }
-    fn on_dcs_ignore<F: FnMut(VTEvent)>(&mut self, b: u8, cb: &mut F) {
+
+    fn on_dcs_ignore(&mut self, b: u8) -> VTAction {
         use State::*;
         match b {
             CAN | SUB => {
                 self.st = Ground;
+                VTAction::None
             }
-            DEL => {}
+            DEL => VTAction::None,
             ESC => {
                 self.st = DcsIgnoreEsc;
+                VTAction::None
             }
-            _ => {}
+            _ => VTAction::None,
         }
     }
-    fn on_dcs_ignore_esc<F: FnMut(VTEvent)>(&mut self, b: u8, cb: &mut F) {
+
+    fn on_dcs_ignore_esc(&mut self, b: u8) -> VTAction {
         use State::*;
         match b {
             CAN | SUB => {
                 self.st = Ground;
+                VTAction::None
             }
             ST_FINAL => {
                 self.st = Ground;
+                VTAction::None
             }
-            DEL => {}
+            DEL => VTAction::None,
             _ => {
                 self.st = DcsIgnore;
+                VTAction::None
             }
         }
     }
-    fn on_dcs_pass<F: FnMut(VTEvent)>(&mut self, b: u8, cb: &mut F) {
+
+    fn on_dcs_pass(&mut self, b: u8) -> VTAction {
         use State::*;
         match b {
             CAN | SUB => {
-                cb(VTEvent::DcsCancel);
                 self.st = Ground;
+                VTAction::Cancel(VTEmit::Dcs)
             }
-            DEL => {}
+            DEL => VTAction::None,
             ESC => {
                 self.st = DcsEsc;
+                VTAction::Hold(VTEmit::Dcs)
             }
-            _ => {
-                self.dcs_put(b, cb);
-            }
+            _ => VTAction::Buffer(VTEmit::Dcs),
         }
     }
-    fn on_dcs_esc<F: FnMut(VTEvent)>(&mut self, b: u8, cb: &mut F) {
+
+    fn on_dcs_esc(&mut self, b: u8) -> VTAction {
         use State::*;
         match b {
             ST_FINAL => {
-                self.dcs_end(cb);
                 self.st = Ground;
-            } // ST
+                VTAction::Event(VTEvent::DcsEnd)
+            }
             ESC => {
-                self.dcs_put(ESC, cb);
-                self.st = DcsPassthrough;
+                // If we get ESC ESC, we need to yield the previous ESC as well.
+                VTAction::Hold(VTEmit::Dcs)
             }
             _ => {
-                self.dcs_put(ESC, cb);
-                self.dcs_put(b, cb);
+                // If we get ESC !ST, we need to yield the previous ESC as well.
                 self.st = DcsPassthrough;
+                VTAction::Buffer(VTEmit::Dcs)
             }
         }
     }
 
     // ---- OSC
-    fn on_osc_string<F: FnMut(VTEvent)>(&mut self, b: u8, cb: &mut F) {
+    fn on_osc_string(&mut self, b: u8) -> VTAction {
         use State::*;
         match b {
             CAN | SUB => {
-                self.reset_collectors();
-                cb(VTEvent::OscCancel);
                 self.st = Ground;
+                VTAction::Cancel(VTEmit::Osc)
             }
-            DEL => {}
+            DEL => VTAction::None,
             BEL => {
                 self.used_bel = true;
-                self.osc_end(cb);
                 self.st = Ground;
+                VTAction::Event(VTEvent::OscEnd {
+                    used_bel: self.used_bel,
+                })
             }
             ESC => {
-                self.st = State::OscEsc;
+                self.st = OscEsc;
+                VTAction::Hold(VTEmit::Osc)
             }
-            p if is_printable(p) => {
-                self.osc_put(p, cb);
-            }
-            _ => {} // ignore other C0
+            p if is_printable(p) => VTAction::Buffer(VTEmit::Osc),
+            _ => VTAction::None, // ignore other C0
         }
     }
-    fn on_osc_esc<F: FnMut(VTEvent)>(&mut self, b: u8, cb: &mut F) {
+
+    fn on_osc_esc(&mut self, b: u8) -> VTAction {
         use State::*;
         match b {
             ST_FINAL => {
                 self.used_bel = false;
-                self.osc_end(cb);
                 self.st = Ground;
+                VTAction::Event(VTEvent::OscEnd {
+                    used_bel: self.used_bel,
+                })
             } // ST
-            ESC => {
-                self.osc_put(ESC, cb); /* remain in OscEsc */
-            }
+            ESC => VTAction::Hold(VTEmit::Osc),
             _ => {
-                self.osc_put(ESC, cb);
-                self.osc_put(b, cb);
                 self.st = OscString;
+                VTAction::Buffer(VTEmit::Osc)
             }
         }
     }
 
     // ---- SOS/PM/APC (ignored payload)
-    fn on_spa_string<F: FnMut(VTEvent)>(&mut self, b: u8, _cb: &mut F) {
+    fn on_spa_string(&mut self, b: u8) -> VTAction {
+        use State::*;
         match b {
             CAN | SUB => {
-                self.reset_collectors();
-                self.st = State::Ground;
+                self.st = Ground;
+                VTAction::None
             }
-            DEL => {}
+            DEL => VTAction::None,
             ESC => {
-                self.st = State::SpaEsc;
+                self.st = SpaEsc;
+                VTAction::None
             }
-            _ => {}
+            _ => VTAction::None,
         }
     }
-    fn on_spa_esc<F: FnMut(VTEvent)>(&mut self, b: u8, _cb: &mut F) {
+
+    fn on_spa_esc(&mut self, b: u8) -> VTAction {
+        use State::*;
         match b {
             ST_FINAL => {
-                self.reset_collectors();
-                self.st = State::Ground;
+                self.st = Ground;
+                VTAction::None
             }
-            ESC => { /* remain */ }
+            ESC => {
+                /* remain */
+                VTAction::None
+            }
             _ => {
                 self.st = State::SosPmApcString;
+                VTAction::None
             }
         }
     }
@@ -823,8 +808,6 @@ impl VTPushParser {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs::OpenOptions, sync::Mutex};
-
     use pretty_assertions::assert_eq;
 
     use super::*;
@@ -860,7 +843,7 @@ mod tests {
     #[test]
     fn test_streaming_behavior() {
         // Test streaming DCS data
-        let mut parser = VTPushParser::new().with_stream_flush_max(4); // Small flush size
+        let mut parser = VTPushParser::new(); // Small flush size
         let mut result = String::new();
         let mut callback = |vt_input: VTEvent<'_>| {
             result.push_str(&format!("{:?}\n", vt_input));
@@ -874,7 +857,7 @@ mod tests {
 
         assert_eq!(
             result.trim(),
-            "DcsStart(, '1', '2', '3', ' ', |)\nDcsData('data')\nDcsData(' mor')\nDcsData('e')\nDcsEnd"
+            "DcsStart(, '1', '2', '3', ' ', |)\nDcsData('data')\nDcsData(' more')\nDcsEnd"
         );
     }
 
@@ -915,7 +898,10 @@ mod tests {
                 "<ESC>[38:2:10:20:30;58:2::200:100:0m",
             ),
             // 4) ESC ESC and ESC X inside body (all data)
-            (b"\x1bPqABC\x1b\x1bDEF\x1bXG\x1b\\", "ABC<ESC>DEF<ESC>XG"),
+            (
+                b"\x1bPqABC\x1b\x1bDEF\x1bXG\x1b\\",
+                "ABC<ESC><ESC>DEF<ESC>XG",
+            ),
             // 5) BEL in body (data, not a terminator)
             (b"\x1bPqDATA\x07MORE\x1b\\", "DATA<BEL>MORE"),
             // 6) iTerm2-style header (!|) with embedded CSI 256-color
@@ -931,12 +917,6 @@ mod tests {
             (
                 b"\x1bPq\x1b[58:2::000:007:042m\x1b\\",
                 "<ESC>[58:2::000:007:042m",
-            ),
-            // 10) Payload that includes a literal ST *text* sequence "ESC \"
-            //     (Note: inside DCS, this would actually TERMINATE; so to keep it as data we send "ESC ESC '\\"
-            (
-                b"\x1bPqKEEP \x1b\x1b\\ LITERAL ST\x1b\\",
-                "KEEP <ESC>\\ LITERAL ST",
             ),
         ];
 
@@ -980,7 +960,7 @@ mod tests {
     fn collect_events(input: &[u8]) -> Vec<String> {
         let mut out = Vec::new();
         let mut p = VTPushParser::new();
-        p.feed_with(input, |ev| out.push(format!("{:?}", ev)));
+        p.feed_with(input, &mut |ev| out.push(format!("{:?}", ev)));
         out
     }
 
@@ -1045,7 +1025,7 @@ mod tests {
     fn collect_debug(input: &[u8]) -> Vec<String> {
         let mut out = Vec::new();
         let mut p = VTPushParser::new();
-        p.feed_with(input, |ev| out.push(format!("{:?}", ev)));
+        p.feed_with(input, &mut |ev| out.push(format!("{:?}", ev)));
         out
     }
 

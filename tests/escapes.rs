@@ -6,7 +6,7 @@ const INPUT: &str = include_str!("escapes.txt");
 fn decode_string(input: &str) -> Vec<u8> {
     let mut result = Vec::new();
     let mut chars = input.chars().peekable();
-    
+
     while let Some(ch) = chars.next() {
         if ch == '<' {
             // Collect characters until '>'
@@ -17,7 +17,7 @@ fn decode_string(input: &str) -> Vec<u8> {
                 }
                 control_name.push(ch);
             }
-            
+
             // Parse the control name and convert to byte
             match control_name.to_uppercase().as_str() {
                 "NUL" => result.push(0),
@@ -67,7 +67,7 @@ fn decode_string(input: &str) -> Vec<u8> {
             result.extend_from_slice(char_bytes.as_bytes());
         }
     }
-    
+
     result
 }
 
@@ -129,6 +129,8 @@ pub fn main() {
         std::fs::write("tests/result.md", output).unwrap();
     } else {
         let expected = std::fs::read_to_string("tests/result.md").unwrap();
-        assert_eq!(output, expected);
+        assert_eq!(expected, output);
+        println!();
+        println!("all tests passed");
     }
 }
