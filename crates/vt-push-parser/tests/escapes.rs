@@ -1,6 +1,6 @@
 use pretty_assertions::assert_eq;
 use vt_push_parser::ascii::{decode_string, encode_string};
-use vt_push_parser::{VTEvent, VTPushParser};
+use vt_push_parser::{VT_PARSER_INTEREST_NONE, VTEvent, VTPushParser};
 
 const INPUT: &str = include_str!("escapes.txt");
 
@@ -74,6 +74,24 @@ fn parse(data: &[&[u8]]) -> String {
 fn test(output: &mut String, test_name: &str, line: &str, decoded: &[u8]) {
     let result = parse(&[decoded]);
 
+    // Ensure that the result is the same no matter what interest flags are set
+    let mut text_content = String::new();
+    let mut text_test = b"text content test:<".to_vec();
+    text_test.extend_from_slice(decoded);
+    text_test.extend_from_slice(b">suffix text context");
+    VTPushParser::decode_buffer(&text_test, |event| match event {
+        VTEvent::Raw(s) => text_content.push_str(String::from_utf8_lossy(s).as_ref()),
+        _ => {}
+    });
+
+    let mut text_content_interest_none = String::new();
+    let mut parser = VTPushParser::new_with_interest::<{ VT_PARSER_INTEREST_NONE }>();
+    parser.feed_with(&text_test, &mut |event| match event {
+        VTEvent::Raw(s) => text_content_interest_none.push_str(String::from_utf8_lossy(s).as_ref()),
+        _ => {}
+    });
+    assert_eq!(text_content, text_content_interest_none);
+
     // Ensure that the result is the same when parsing in various chunk sizes
     for chunk_size in 1..=decoded.len() {
         let mut byte_by_byte = Vec::new();
@@ -131,6 +149,8 @@ pub fn main() {
     let mut failures = 0;
     output.push_str("# Escapes\n");
 
+    let filter = std::env::args().nth(1).unwrap_or_default();
+
     let mut test_name = String::new();
     for line in INPUT.lines() {
         let line = line.trim();
@@ -141,6 +161,11 @@ pub fn main() {
             test_name = stripped_name.to_owned();
             continue;
         }
+
+        if !filter.is_empty() && !test_name.contains(&filter) {
+            continue;
+        }
+
         let decoded = decode_string(line);
         println!("  running {:?} ...", test_name);
         let test_name_clone = test_name.clone();
@@ -163,11 +188,13 @@ pub fn main() {
         std::process::exit(1);
     }
 
-    if std::env::var("UPDATE").is_ok() {
-        std::fs::write("tests/result.md", output).unwrap();
-    } else {
-        let expected = std::fs::read_to_string("tests/result.md").unwrap();
-        assert_eq!(expected, output);
-        println!("all tests passed");
+    if filter.is_empty() {
+        if std::env::var("UPDATE").is_ok() {
+            std::fs::write("tests/result.md", output).unwrap();
+        } else {
+            let expected = std::fs::read_to_string("tests/result.md").unwrap();
+            assert_eq!(expected, output);
+            println!("all tests passed");
+        }
     }
 }

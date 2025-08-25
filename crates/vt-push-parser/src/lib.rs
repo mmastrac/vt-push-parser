@@ -22,7 +22,7 @@ const ST_FINAL: u8 = b'\\';
 pub use event::{VTEvent, VTIntermediate};
 pub use signature::VTEscapeSignature;
 
-use crate::event::ParamBuf;
+use crate::event::{Param, ParamBuf, Params};
 
 /// The action to take with the most recently accumulated byte.
 pub enum VTAction<'a> {
@@ -53,8 +53,9 @@ pub enum VTEmit {
 }
 
 #[inline]
-fn is_c0(b: u8) -> bool {
-    b <= 0x1F
+const fn is_c0(b: u8) -> bool {
+    // Control characters, with the exception of the common whitespace controls.
+    b <= 0x1F && b != b'\r' && b != b'\n' && b != b'\t'
 }
 #[inline]
 fn is_printable(b: u8) -> bool {
@@ -65,8 +66,8 @@ fn is_intermediate(b: u8) -> bool {
     (0x20..=0x2F).contains(&b)
 }
 #[inline]
-fn is_final(b: u8) -> bool {
-    (0x30..=0x7E).contains(&b)
+const fn is_final(b: u8) -> bool {
+    b >= 0x40 && b <= 0x7E
 }
 #[inline]
 fn is_digit(b: u8) -> bool {
@@ -76,6 +77,24 @@ fn is_digit(b: u8) -> bool {
 fn is_priv(b: u8) -> bool {
     matches!(b, b'<' | b'=' | b'>' | b'?')
 }
+
+macro_rules! byte_predicate {
+    (|$p:ident| $body:block) => {{
+        let mut out: [bool; 256] = [false; 256];
+        let mut i = 0;
+        while i < 256 {
+            let $p: u8 = i as u8;
+            out[i] = $body;
+            i += 1;
+        }
+        out
+    }};
+}
+
+const ENDS_CSI: [bool; 256] =
+    byte_predicate!(|b| { is_final(b) || b == ESC || b == CAN || b == SUB });
+
+const ENDS_GROUND: [bool; 256] = byte_predicate!(|b| { is_c0(b) || b == DEL });
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum State {
@@ -99,13 +118,27 @@ enum State {
     SpaEsc,
 }
 
-pub struct VTPushParser {
+pub const VT_PARSER_INTEREST_NONE: u8 = 0;
+/// Request CSI events from parser.
+pub const VT_PARSER_INTEREST_CSI: u8 = 1 << 0;
+/// Request DCS events from parser.
+pub const VT_PARSER_INTEREST_DCS: u8 = 1 << 1;
+/// Request OSC events from parser.
+pub const VT_PARSER_INTEREST_OSC: u8 = 1 << 2;
+/// Request other events from parser.
+pub const VT_PARSER_INTEREST_OTHER: u8 = 1 << 3;
+pub const VT_PARSER_INTEREST_ALL: u8 = VT_PARSER_INTEREST_CSI
+    | VT_PARSER_INTEREST_DCS
+    | VT_PARSER_INTEREST_OSC
+    | VT_PARSER_INTEREST_OTHER;
+
+pub struct VTPushParser<const INTEREST: u8 = VT_PARSER_INTEREST_ALL> {
     st: State,
 
     // Header collectors for short escapes (we borrow from these in callbacks)
     ints: VTIntermediate,
-    params: Vec<Vec<u8>>,
-    cur_param: Vec<u8>,
+    params: Params,
+    cur_param: Param,
     priv_prefix: Option<u8>,
     held_byte: Option<u8>,
     held_emit: Option<VTEmit>,
@@ -116,23 +149,33 @@ pub struct VTPushParser {
 
 impl VTPushParser {
     pub fn new() -> Self {
+        VTPushParser::new_with()
+    }
+
+    /// Decode a buffer of bytes into a series of events.
+    pub fn decode_buffer<'a>(input: &'a [u8], mut cb: impl for<'b> FnMut(VTEvent<'b>)) {
+        let mut parser = VTPushParser::new();
+        parser.feed_with(input, &mut cb);
+        parser.finish(&mut cb);
+    }
+
+    pub fn new_with_interest<const INTEREST: u8>() -> VTPushParser<INTEREST> {
+        VTPushParser::new_with()
+    }
+}
+
+impl<const INTEREST: u8> VTPushParser<INTEREST> {
+    fn new_with() -> Self {
         Self {
             st: State::Ground,
             ints: VTIntermediate::default(),
-            params: Vec::with_capacity(8),
-            cur_param: Vec::with_capacity(8),
+            params: SmallVec::new(),
+            cur_param: SmallVec::new(),
             priv_prefix: None,
             held_byte: None,
             held_emit: None,
             used_bel: false,
         }
-    }
-
-    /// Decode a buffer of bytes into a series of events.
-    pub fn decode_buffer<'a>(input: &'a [u8], mut cb: impl for<'b> FnMut(VTEvent<'b>)) {
-        let mut parser = Self::new();
-        parser.feed_with(input, &mut cb);
-        parser.finish(&mut cb);
     }
 
     // =====================
@@ -146,22 +189,23 @@ impl VTPushParser {
     ///
     /// The callback may emit any number of events (including zero), depending
     /// on the state of the internal parser.
+    #[inline]
     pub fn feed_with<'this: 'input, 'input, F: for<'any> FnMut(VTEvent<'any>)>(
         &'this mut self,
-        input: &'input [u8],
+        mut input: &'input [u8],
         cb: &mut F,
     ) {
         if input.is_empty() {
             return;
         }
 
-        struct State {
+        struct FeedState {
             buffer_idx: usize,
             current_emit: Option<VTEmit>,
             hold: bool,
         }
 
-        let mut state = State {
+        let mut state = FeedState {
             buffer_idx: 0,
             current_emit: self.held_emit.take(),
             hold: self.held_byte.is_some(),
@@ -189,9 +233,57 @@ impl VTPushParser {
         }
 
         let mut held_byte = self.held_byte.take();
+        let mut i = 0;
 
-        for (i, &b) in input.iter().enumerate() {
-            let action = self.push_with(b);
+        while i < input.len() {
+            // Fast path for the common case of no ANSI escape sequences.
+            if self.st == State::Ground {
+                let start = i;
+                loop {
+                    if i >= input.len() {
+                        cb(VTEvent::Raw(&input[start..]));
+                        return;
+                    }
+                    if ENDS_GROUND[input[i] as usize] {
+                        break;
+                    }
+                    i += 1;
+                }
+
+                if start != i {
+                    cb(VTEvent::Raw(&input[start..i]));
+                }
+
+                if input[i] == ESC {
+                    self.clear_hdr_collectors();
+                    self.st = State::Escape;
+                    i = i + 1;
+                    continue;
+                }
+            }
+
+            // Fast path: search for the CSI final
+            if self.st == State::CsiIgnore {
+                loop {
+                    if i >= input.len() {
+                        return;
+                    }
+                    if ENDS_CSI[input[i] as usize] {
+                        break;
+                    }
+                    i += 1;
+                }
+
+                if input[i] == ESC {
+                    self.st = State::Escape;
+                } else {
+                    self.st = State::Ground;
+                }
+                i += 1;
+                continue;
+            }
+
+            let action = self.push_with(input[i]);
 
             match action {
                 VTAction::None => {
@@ -230,6 +322,7 @@ impl VTPushParser {
                     }
                 }
             };
+            i += 1;
         }
 
         // Is there more to emit?
@@ -366,11 +459,19 @@ impl VTPushParser {
                 VTAction::None
             }
             CSI => {
-                self.st = CsiEntry;
+                if INTEREST & VT_PARSER_INTEREST_CSI == 0 {
+                    self.st = CsiIgnore;
+                } else {
+                    self.st = CsiEntry;
+                }
                 VTAction::None
             }
             DCS => {
-                self.st = DcsEntry;
+                if INTEREST & VT_PARSER_INTEREST_DCS == 0 {
+                    self.st = DcsIgnore;
+                } else {
+                    self.st = DcsEntry;
+                }
                 VTAction::None
             }
             OSC => {
@@ -382,7 +483,7 @@ impl VTPushParser {
                 self.st = State::SosPmApcString;
                 VTAction::None
             }
-            c if is_final(c) => {
+            c if is_final(c) || is_digit(c) => {
                 self.st = Ground;
                 VTAction::Event(VTEvent::Esc {
                     intermediates: self.ints,
@@ -412,7 +513,7 @@ impl VTPushParser {
                 self.ints.push(c);
                 VTAction::None
             }
-            c if is_final(c) => {
+            c if is_final(c) || is_digit(c) => {
                 self.st = Ground;
                 VTAction::Event(VTEvent::Esc {
                     intermediates: self.ints,
@@ -666,7 +767,7 @@ impl VTPushParser {
                 self.ints.push(c);
                 VTAction::None
             }
-            c if is_final(c) => {
+            c if is_final(c) || is_digit(c) || c == b':' || c == b';' => {
                 self.st = DcsPassthrough;
                 self.dcs_start(c)
             }
@@ -705,6 +806,7 @@ impl VTPushParser {
                 VTAction::None
             }
             DEL => VTAction::None,
+            ESC => VTAction::None,
             _ => {
                 self.st = DcsIgnore;
                 VTAction::None

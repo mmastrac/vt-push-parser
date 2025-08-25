@@ -31,9 +31,7 @@ Csi(, '8', '34', '148', '', 't')
 ```
 
 ```
-C0(0a)
-C0(0d)
-C0(09)
+<LF><CR><TAB>
 C0(08)
 C0(0c)
 C0(0b)
@@ -45,9 +43,7 @@ Hello<LF>World
 ```
 
 ```
-Hello
-C0(0a)
-World
+Hello<LF>World
 ```
 ---
 ## Raw text with delete character

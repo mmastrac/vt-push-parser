@@ -1,0 +1,25 @@
+[package]
+name = "benches"
+publish = false
+edition = "2024"
+authors = ["Matt Mastracci <matthew@mastracci.com>"]
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/mmastrac/vt-push-parser"
+description = "Benches for the vt-push-parser crate"
+readme = "README.md"
+
+[dependencies]
+strip-ansi = "0.1.0"
+strip-ansi-escapes = "0.2.1"
+vt-push-parser = { version = "0.2.0", path = "../vt-push-parser" }
+fast-strip-ansi = { version = "0.1.0", path = "../fast-strip-ansi" }
+
+[dev-dependencies]
+divan = "0.1.21"
+pretty_assertions = "1.4.1"
+
+[[bench]]
+name = "comparison"
+harness = false
+path = "benches/comparison.rs"
+

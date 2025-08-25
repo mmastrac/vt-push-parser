@@ -1,0 +1,22 @@
+[package]
+name = "vt-push-parser"
+version = "0.2.0"
+edition = "2024"
+authors = ["Matt Mastracci <matthew@mastracci.com>"]
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/mmastrac/vt-push-parser"
+description = "A streaming push parser for the VT protocol"
+readme = "README.md"
+
+[dependencies]
+smallvec = "1.10.0"
+hex = "0.4.3"
+
+[dev-dependencies]
+pretty_assertions = "1.4.0"
+hxdmp = "0.2.1"
+
+[[test]]
+name = "escapes"
+path = "tests/escapes.rs"
+harness = false

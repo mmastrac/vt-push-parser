@@ -1,5 +1,7 @@
 use std::iter::Map;
 
+use smallvec::SmallVec;
+
 use crate::AsciiControl;
 
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
@@ -77,15 +79,18 @@ impl std::fmt::Debug for VTIntermediate {
     }
 }
 
+pub(crate) type Param = SmallVec<[u8; 32]>;
+pub(crate) type Params = SmallVec<[Param; 8]>;
+
 #[derive(PartialEq, Eq)]
 #[repr(transparent)]
 pub struct ParamBuf<'a> {
-    pub(crate) params: &'a Vec<Vec<u8>>,
+    pub(crate) params: &'a Params,
 }
 
 impl<'a> IntoIterator for ParamBuf<'a> {
     type Item = &'a [u8];
-    type IntoIter = Map<std::slice::Iter<'a, Vec<u8>>, fn(&Vec<u8>) -> &[u8]>;
+    type IntoIter = Map<std::slice::Iter<'a, Param>, fn(&Param) -> &[u8]>;
     fn into_iter(self) -> Self::IntoIter {
         self.params.iter().map(|p| p.as_slice())
     }
@@ -93,7 +98,7 @@ impl<'a> IntoIterator for ParamBuf<'a> {
 
 impl<'b, 'a> IntoIterator for &'b ParamBuf<'a> {
     type Item = &'a [u8];
-    type IntoIter = Map<std::slice::Iter<'a, Vec<u8>>, fn(&Vec<u8>) -> &[u8]>;
+    type IntoIter = Map<std::slice::Iter<'a, Param>, fn(&Param) -> &[u8]>;
     fn into_iter(self) -> Self::IntoIter {
         self.params.iter().map(|p| p.as_slice())
     }
@@ -110,7 +115,7 @@ impl<'a> ParamBuf<'a> {
 
     pub fn to_owned(&self) -> ParamBufOwned {
         ParamBufOwned {
-            params: self.params.iter().map(|p| p.to_vec()).collect(),
+            params: self.params.iter().map(|p| p.clone()).collect(),
         }
     }
 }
@@ -352,12 +357,12 @@ impl<'a> VTEvent<'a> {
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct ParamBufOwned {
-    pub(crate) params: Vec<Vec<u8>>,
+    pub(crate) params: Params,
 }
 
 impl IntoIterator for ParamBufOwned {
-    type Item = Vec<u8>;
-    type IntoIter = std::vec::IntoIter<Vec<u8>>;
+    type Item = Param;
+    type IntoIter = <Params as IntoIterator>::IntoIter;
     fn into_iter(self) -> Self::IntoIter {
         self.params.into_iter()
     }
@@ -365,7 +370,7 @@ impl IntoIterator for ParamBufOwned {
 
 impl<'b> IntoIterator for &'b ParamBufOwned {
     type Item = &'b [u8];
-    type IntoIter = Map<std::slice::Iter<'b, Vec<u8>>, fn(&Vec<u8>) -> &[u8]>;
+    type IntoIter = Map<std::slice::Iter<'b, Param>, fn(&Param) -> &[u8]>;
     fn into_iter(self) -> Self::IntoIter {
         self.params.iter().map(|p| p.as_slice())
     }
