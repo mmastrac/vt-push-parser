@@ -26,8 +26,8 @@ sequences.
 Note that `fast-strip-ansi` has wider support for ANSI escape sequences than
 most crates but is still the fastest option.
 
-It is significantly faster than `strip-ansi` and `strip-ansi-escapes` in
-callback and bytes mode.
+It is significantly faster than `strip-ansi` and `strip-ansi-escapes` in all
+modes.
 
 ```mermaid
 xychart
