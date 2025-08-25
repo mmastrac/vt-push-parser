@@ -113,6 +113,18 @@ impl<'a> ParamBuf<'a> {
         self.params.is_empty()
     }
 
+    pub fn get(&self, index: usize) -> Option<&[u8]> {
+        self.params.get(index).map(|p| p.as_slice())
+    }
+
+    pub fn try_parse<T: std::str::FromStr>(&self, index: usize) -> Option<T> {
+        self.params.get(index).and_then(|p| {
+            std::str::from_utf8(p.as_slice())
+                .ok()
+                .and_then(|s| s.parse::<T>().ok())
+        })
+    }
+
     pub fn to_owned(&self) -> ParamBufOwned {
         ParamBufOwned {
             params: self.params.iter().map(|p| p.clone()).collect(),
@@ -383,6 +395,18 @@ impl ParamBufOwned {
 
     pub fn is_empty(&self) -> bool {
         self.params.is_empty()
+    }
+
+    pub fn get(&self, index: usize) -> Option<&[u8]> {
+        self.params.get(index).map(|p| p.as_slice())
+    }
+
+    pub fn try_parse<T: std::str::FromStr>(&self, index: usize) -> Option<T> {
+        self.params.get(index).and_then(|p| {
+            std::str::from_utf8(p.as_slice())
+                .ok()
+                .and_then(|s| s.parse::<T>().ok())
+        })
     }
 
     pub fn borrow(&self) -> ParamBuf<'_> {

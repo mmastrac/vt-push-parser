@@ -35,6 +35,7 @@ dependencies = [
  "pretty_assertions",
  "strip-ansi",
  "strip-ansi-escapes",
+ "vt-push-parser",
 ]
 
 [[package]]
@@ -288,7 +289,7 @@ checksum = "5a5f39404a5da50712a4c1eecf25e90dd62b613502b7e925fd4e4d19b5c96512"
 
 [[package]]
 name = "vt-push-parser"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "hex",
  "hxdmp",

@@ -11,7 +11,8 @@ readme = "README.md"
 [dependencies]
 strip-ansi = "0.1.0"
 strip-ansi-escapes = "0.2.1"
-fast-strip-ansi = { version = "0.1.1", path = "../fast-strip-ansi" }
+vt-push-parser = { path = "../vt-push-parser" }
+fast-strip-ansi = { path = "../fast-strip-ansi" }
 
 [dev-dependencies]
 divan = "0.1.21"
