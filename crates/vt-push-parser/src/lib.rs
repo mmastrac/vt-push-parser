@@ -14,7 +14,6 @@ const CAN: u8 = AsciiControl::Can as _;
 const SUB: u8 = AsciiControl::Sub as _;
 const CSI: u8 = b'[';
 const OSC: u8 = b']';
-const SS3: u8 = b'O';
 const DCS: u8 = b'P';
 const ST_FINAL: u8 = b'\\';
 
@@ -142,13 +141,10 @@ pub struct VTPushParser<const INTEREST: u8 = VT_PARSER_INTEREST_ALL> {
     priv_prefix: Option<u8>,
     held_byte: Option<u8>,
     held_emit: Option<VTEmit>,
-
-    // Streaming buffer (DCS/OSC bodies)
-    used_bel: bool,
 }
 
 impl VTPushParser {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         VTPushParser::new_with()
     }
 
@@ -159,22 +155,21 @@ impl VTPushParser {
         parser.finish(&mut cb);
     }
 
-    pub fn new_with_interest<const INTEREST: u8>() -> VTPushParser<INTEREST> {
+    pub const fn new_with_interest<const INTEREST: u8>() -> VTPushParser<INTEREST> {
         VTPushParser::new_with()
     }
 }
 
 impl<const INTEREST: u8> VTPushParser<INTEREST> {
-    fn new_with() -> Self {
+    const fn new_with() -> Self {
         Self {
             st: State::Ground,
-            ints: VTIntermediate::default(),
-            params: SmallVec::new(),
-            cur_param: SmallVec::new(),
+            ints: VTIntermediate::empty(),
+            params: SmallVec::new_const(),
+            cur_param: SmallVec::new_const(),
             priv_prefix: None,
             held_byte: None,
             held_emit: None,
-            used_bel: false,
         }
     }
 
@@ -382,7 +377,6 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
 
     fn reset_collectors(&mut self) {
         self.clear_hdr_collectors();
-        self.used_bel = false;
     }
 
     fn next_param(&mut self) {
@@ -418,7 +412,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
 
         let privp = self.priv_prefix.take();
         VTAction::Event(VTEvent::DcsStart {
-            priv_prefix: privp,
+            private: privp,
             params: ParamBuf {
                 params: &self.params,
             },
@@ -475,7 +469,6 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                 VTAction::None
             }
             OSC => {
-                self.used_bel = false;
                 self.st = OscString;
                 VTAction::Event(VTEvent::OscStart)
             }
@@ -492,7 +485,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
             }
             ESC => {
                 // ESC ESC allowed, but we stay in the current state
-                VTAction::None
+                VTAction::Event(VTEvent::C0(ESC))
             }
             _ => {
                 self.st = Ground;
@@ -859,11 +852,8 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
             }
             DEL => VTAction::None,
             BEL => {
-                self.used_bel = true;
                 self.st = Ground;
-                VTAction::Event(VTEvent::OscEnd {
-                    used_bel: self.used_bel,
-                })
+                VTAction::Event(VTEvent::OscEnd { used_bel: true })
             }
             ESC => {
                 self.st = OscEsc;
@@ -878,11 +868,8 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         use State::*;
         match b {
             ST_FINAL => {
-                self.used_bel = false;
                 self.st = Ground;
-                VTAction::Event(VTEvent::OscEnd {
-                    used_bel: self.used_bel,
-                })
+                VTAction::Event(VTEvent::OscEnd { used_bel: false })
             } // ST
             ESC => VTAction::Hold(VTEmit::Osc),
             _ => {

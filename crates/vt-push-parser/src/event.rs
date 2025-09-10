@@ -2,7 +2,7 @@ use std::iter::Map;
 
 use smallvec::SmallVec;
 
-use crate::AsciiControl;
+use crate::{AsciiControl, BEL, CAN, CSI, DCS, ESC, OSC, ST_FINAL};
 
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
 pub struct VTIntermediate {
@@ -61,6 +61,10 @@ impl VTIntermediate {
 
     pub const fn const_eq(&self, other: &Self) -> bool {
         self.data[0] == other.data[0] && self.data[1] == other.data[1]
+    }
+
+    pub fn byte_len(&self) -> usize {
+        self.data.iter().filter(|&&c| c != 0).count()
     }
 }
 
@@ -130,6 +134,10 @@ impl<'a> ParamBuf<'a> {
             params: self.params.iter().map(|p| p.clone()).collect(),
         }
     }
+
+    pub fn byte_len(&self) -> usize {
+        self.params.iter().map(|p| p.len()).sum::<usize>() + self.params.len().saturating_sub(1)
+    }
 }
 
 pub enum VTEvent<'a> {
@@ -153,15 +161,9 @@ pub enum VTEvent<'a> {
         final_byte: u8,
     },
 
-    // SS3 (ESC O …)
-    Ss3 {
-        intermediates: VTIntermediate,
-        final_byte: u8,
-    },
-
     // DCS stream
     DcsStart {
-        priv_prefix: Option<u8>,
+        private: Option<u8>,
         params: ParamBuf<'a>,
         intermediates: VTIntermediate,
         final_byte: u8,
@@ -174,6 +176,7 @@ pub enum VTEvent<'a> {
     OscStart,
     OscData(&'a [u8]),
     OscEnd {
+        /// Whether the BEL was used to end the OSC stream.
         used_bel: bool,
     },
     OscCancel,
@@ -233,23 +236,14 @@ impl<'a> std::fmt::Debug for VTEvent<'a> {
                 write!(f, ", {:?})", *final_byte as char)?;
                 Ok(())
             }
-            Ss3 {
-                intermediates,
-                final_byte,
-            } => {
-                write!(f, "Ss3(")?;
-                write!(f, "{:?}", intermediates)?;
-                write!(f, ", {})", *final_byte as char)?;
-                Ok(())
-            }
             DcsStart {
-                priv_prefix,
+                private,
                 params,
                 intermediates,
                 final_byte,
             } => {
                 write!(f, "DcsStart(")?;
-                if let Some(p) = priv_prefix {
+                if let Some(p) = private {
                     write!(f, "{:?}", *p as char)?;
                 }
                 for param in params {
@@ -313,6 +307,150 @@ impl<'a> std::fmt::Debug for VTEvent<'a> {
 }
 
 impl<'a> VTEvent<'a> {
+    pub fn byte_len(&self) -> usize {
+        use VTEvent::*;
+        let len = match self {
+            Raw(s) => s.len(),
+            C0(_) => 1,
+            Esc { intermediates, .. } => intermediates.len() + 2,
+            Csi {
+                private,
+                params,
+                intermediates,
+                ..
+            } => private.is_some() as usize + params.byte_len() + intermediates.byte_len() + 3,
+            DcsStart {
+                private,
+                params,
+                intermediates,
+                ..
+            } => private.is_some() as usize + params.byte_len() + intermediates.byte_len() + 3,
+            DcsData(s) => s.len(),
+            DcsEnd => 2,
+            DcsCancel => 1,
+            OscStart => 2,
+            OscData(s) => s.len(),
+            OscEnd { used_bel } => {
+                if *used_bel {
+                    1
+                } else {
+                    2
+                }
+            }
+            OscCancel => 1,
+        };
+        len
+    }
+
+    /// Encode the event into the provided buffer, returning the number of bytes
+    /// required for the escape sequence in either `Ok(n)` or `Err(n)`.
+    ///
+    /// Note that some events may have multiple possible encodings, so this method
+    /// may decide to choose whichever is more efficient.
+    pub fn encode(&self, mut buf: &mut [u8]) -> Result<usize, usize> {
+        use VTEvent::*;
+        let len = self.byte_len();
+
+        if len > buf.len() {
+            return Err(len);
+        }
+
+        match self {
+            Raw(s) | OscData(s) | DcsData(s) => {
+                buf[..s.len()].copy_from_slice(s);
+            }
+            OscCancel | DcsCancel => {
+                buf[0] = CAN;
+            }
+            C0(b) => {
+                buf[0] = *b;
+            }
+            Esc {
+                intermediates,
+                final_byte,
+            } => {
+                buf[0] = ESC;
+                buf[1..intermediates.len() + 1]
+                    .copy_from_slice(&intermediates.data[..intermediates.len()]);
+                buf[intermediates.len() + 1] = *final_byte;
+            }
+            Csi {
+                private,
+                params,
+                intermediates,
+                final_byte,
+            } => {
+                buf[0] = ESC;
+                buf[1] = CSI;
+                buf = &mut buf[2..];
+                if let Some(p) = private {
+                    buf[0] = *p;
+                    buf = &mut buf[1..];
+                }
+                let mut params = params.into_iter();
+                if let Some(param) = params.next() {
+                    buf[..param.len()].copy_from_slice(param);
+                    buf = &mut buf[param.len()..];
+                    for param in params {
+                        buf[0] = b';';
+                        buf = &mut buf[1..];
+                        buf[..param.len()].copy_from_slice(param);
+                        buf = &mut buf[param.len()..];
+                    }
+                }
+                buf[..intermediates.len()]
+                    .copy_from_slice(&intermediates.data[..intermediates.len()]);
+                buf[intermediates.len()] = *final_byte;
+            }
+            DcsStart {
+                private,
+                params,
+                intermediates,
+                final_byte,
+            } => {
+                buf[0] = ESC;
+                buf[1] = DCS;
+                buf = &mut buf[2..];
+                if let Some(p) = private {
+                    buf[0] = *p;
+                    buf = &mut buf[1..];
+                }
+                let mut params = params.into_iter();
+                if let Some(param) = params.next() {
+                    buf[..param.len()].copy_from_slice(param);
+                    buf = &mut buf[param.len()..];
+                    for param in params {
+                        buf[0] = b';';
+                        buf = &mut buf[1..];
+                        buf[..param.len()].copy_from_slice(param);
+                        buf = &mut buf[param.len()..];
+                    }
+                }
+                buf[..intermediates.len()]
+                    .copy_from_slice(&intermediates.data[..intermediates.len()]);
+                buf[intermediates.len()] = *final_byte;
+            }
+            DcsEnd => {
+                buf[0] = ESC;
+                buf[1] = ST_FINAL;
+            }
+            OscStart => {
+                buf[0] = ESC;
+                buf[1] = OSC;
+            }
+            OscEnd { used_bel } => {
+                if *used_bel {
+                    buf[0] = BEL;
+                } else {
+                    buf[0] = ESC;
+                    buf[1] = ST_FINAL
+                }
+            }
+        }
+
+        Ok(len)
+    }
+
     pub fn to_owned(&self) -> VTOwnedEvent {
         use VTEvent::*;
         match self {
@@ -336,20 +474,13 @@ impl<'a> VTEvent<'a> {
                 intermediates: intermediates.clone(),
                 final_byte: *final_byte,
             },
-            Ss3 {
-                intermediates,
-                final_byte,
-            } => VTOwnedEvent::Ss3 {
-                intermediates: intermediates.clone(),
-                final_byte: *final_byte,
-            },
             DcsStart {
-                priv_prefix,
+                private,
                 params,
                 intermediates,
                 final_byte,
             } => VTOwnedEvent::DcsStart {
-                priv_prefix: priv_prefix.clone(),
+                private: private.clone(),
                 params: params.to_owned(),
                 intermediates: intermediates.clone(),
                 final_byte: *final_byte,
@@ -430,12 +561,8 @@ pub enum VTOwnedEvent {
         intermediates: VTIntermediate,
         final_byte: u8,
     },
-    Ss3 {
-        intermediates: VTIntermediate,
-        final_byte: u8,
-    },
     DcsStart {
-        priv_prefix: Option<u8>,
+        private: Option<u8>,
         params: ParamBufOwned,
         intermediates: VTIntermediate,
         final_byte: u8,
@@ -480,20 +607,13 @@ impl VTOwnedEvent {
                 intermediates: intermediates.clone(),
                 final_byte: *final_byte,
             },
-            VTOwnedEvent::Ss3 {
-                intermediates,
-                final_byte,
-            } => VTEvent::Ss3 {
-                intermediates: intermediates.clone(),
-                final_byte: *final_byte,
-            },
             VTOwnedEvent::DcsStart {
-                priv_prefix,
+                private,
                 params,
                 intermediates,
                 final_byte,
             } => VTEvent::DcsStart {
-                priv_prefix: priv_prefix.clone(),
+                private: private.clone(),
                 params: params.borrow(),
                 intermediates: intermediates.clone(),
                 final_byte: *final_byte,

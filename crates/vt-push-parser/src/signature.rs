@@ -86,16 +86,8 @@ impl VTEscapeSignature {
                     && self.const_private_eq(private)
                     && self.const_contains(params.len())
             }
-            VTEvent::Ss3 {
-                intermediates,
-                final_byte,
-            } => {
-                self.prefix == SS3
-                    && self.final_byte == *final_byte
-                    && self.intermediates.const_eq(intermediates)
-            }
             VTEvent::DcsStart {
-                priv_prefix,
+                private,
                 params,
                 intermediates,
                 final_byte,
@@ -103,7 +95,7 @@ impl VTEscapeSignature {
                 self.prefix == DCS
                     && self.final_byte == *final_byte
                     && self.intermediates.const_eq(intermediates)
-                    && self.private == *priv_prefix
+                    && self.private == *private
                     && self.const_contains(params.len())
             }
             _ => false,

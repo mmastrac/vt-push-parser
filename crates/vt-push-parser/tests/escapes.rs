@@ -22,7 +22,7 @@ fn parse(data: &[&[u8]]) -> String {
                 result.push(VTAccumulator::Raw(encode_string(s)));
             }
         }
-        VTEvent::Csi { .. } | VTEvent::Ss3 { .. } | VTEvent::Esc { .. } | VTEvent::C0(_) => {
+        VTEvent::Csi { .. } | VTEvent::Esc { .. } | VTEvent::C0(_) => {
             result.push(VTAccumulator::Esc(format!("{vt_input:?}")))
         }
         VTEvent::DcsStart { .. } => result.push(VTAccumulator::Dcs(format!("{vt_input:?}, data="))),
@@ -132,6 +132,40 @@ fn test(output: &mut String, test_name: &str, line: &str, decoded: &[u8]) {
         panic!(
             "Prefix string did not match expectations:\n{result_prefix}\nExpected one of:\n{e1}\n-- or --\n\n{e2}"
         );
+    }
+
+    // Ensure that the re-encoded result is the same as the original
+    if !test_name.contains("cancelled")
+        && !test_name.contains("invalid")
+        && !test_name.starts_with("APC:")
+        && !test_name.starts_with("PM:")
+        && !test_name.starts_with("SOS:")
+    {
+        let mut re_encoded = Vec::new();
+        let mut raw_del = false;
+        VTPushParser::decode_buffer(&decoded, |event| {
+            let mut buffer = [0_u8; 1024];
+            let n = event.encode(&mut buffer).unwrap();
+            re_encoded.extend_from_slice(&buffer[..n]);
+
+            if matches!(event, VTEvent::C0(0x7f)) {
+                raw_del = true;
+            }
+        });
+        let decoded = if raw_del {
+            decoded.to_vec()
+        } else {
+            decoded
+                .into_iter()
+                .cloned()
+                .filter(|b| *b != 0x7F)
+                .collect::<Vec<_>>()
+        };
+        if re_encoded != decoded {
+            panic!(
+                "Re-encoded result did not match original:\n{re_encoded:?}\nExpected:\n{decoded:?}"
+            );
+        }
     }
 
     output.push_str(&format!("## {test_name}\n```\n{}\n```\n\n", line));

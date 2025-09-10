@@ -9,7 +9,7 @@ description = "A streaming push parser for the VT protocol"
 readme = "README.md"
 
 [dependencies]
-smallvec = "1.10.0"
+smallvec = { version = "1.10.0", features = ["const_new", "const_generics"] }
 hex = "0.4.3"
 
 [dev-dependencies]
