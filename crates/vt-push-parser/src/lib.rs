@@ -329,6 +329,21 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
+    /// Feed an idle event into the parser. This will emit a C0(ESC) event if
+    /// the parser is in the Escape state, and will silently cancel any EscInt
+    /// state.
+    pub fn idle(&mut self) -> Option<VTEvent<'static>> {
+        if self.st == State::Escape {
+            self.st = State::Ground;
+            Some(VTEvent::C0(ESC))
+        } else if self.st == State::EscInt {
+            self.st = State::Ground;
+            None
+        } else {
+            None
+        }
+    }
+
     fn push_with<'this, 'input>(&'this mut self, b: u8) -> VTAction<'this> {
         use State::*;
         match self.st {
@@ -448,8 +463,11 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
             }
             DEL => VTAction::None,
             c if is_intermediate(c) => {
-                self.ints.push(c);
-                self.st = EscInt;
+                if self.ints.push(c) {
+                    self.st = EscInt;
+                } else {
+                    self.st = Ground;
+                }
                 VTAction::None
             }
             CSI => {
@@ -503,7 +521,9 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
             }
             DEL => VTAction::None,
             c if is_intermediate(c) => {
-                self.ints.push(c);
+                if !self.ints.push(c) {
+                    self.st = Ground;
+                }
                 VTAction::None
             }
             c if is_final(c) || is_digit(c) => {
@@ -554,8 +574,11 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                 VTAction::None
             }
             c if is_intermediate(c) => {
-                self.ints.push(c);
-                self.st = CsiInt;
+                if self.ints.push(c) {
+                    self.st = CsiInt;
+                } else {
+                    self.st = Ground;
+                }
                 VTAction::None
             }
             c if is_final(c) => {
@@ -594,8 +617,11 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                 VTAction::None
             }
             c if is_intermediate(c) => {
-                self.ints.push(c);
-                self.st = CsiInt;
+                if self.ints.push(c) {
+                    self.st = CsiInt;
+                } else {
+                    self.st = Ground;
+                }
                 VTAction::None
             }
             c if is_final(c) => {
@@ -622,7 +648,11 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                 VTAction::None
             }
             c if is_intermediate(c) => {
-                self.ints.push(c);
+                if self.ints.push(c) {
+                    self.st = CsiInt;
+                } else {
+                    self.st = Ground;
+                }
                 VTAction::None
             }
             c if is_final(c) => {
@@ -689,8 +719,11 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                 VTAction::None
             }
             c if is_intermediate(c) => {
-                self.ints.push(c);
-                self.st = DcsInt;
+                if self.ints.push(c) {
+                    self.st = DcsInt;
+                } else {
+                    self.st = Ground;
+                }
                 VTAction::None
             }
             c if is_final(c) => {
@@ -729,7 +762,11 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                 VTAction::None
             }
             c if is_intermediate(c) => {
-                self.ints.push(c);
+                if self.ints.push(c) {
+                    self.st = DcsInt;
+                } else {
+                    self.st = Ground;
+                }
                 self.st = DcsInt;
                 VTAction::None
             }
@@ -757,7 +794,11 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                 VTAction::None
             }
             c if is_intermediate(c) => {
-                self.ints.push(c);
+                if self.ints.push(c) {
+                    self.st = DcsInt;
+                } else {
+                    self.st = Ground;
+                }
                 VTAction::None
             }
             c if is_final(c) || is_digit(c) || c == b':' || c == b';' => {

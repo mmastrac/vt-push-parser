@@ -21,7 +21,7 @@ Hello<DEL>World
 # CSI: Set graphics mode with colon parameter (3:1,2,3,4,5, final m)
 <ESC>[3:1;2;3;4;5m
 # CSI: Cursor up with intermediate space character (final M)
-<ESC>[  M
+<ESC>[ M
 
 # OSC: Set foreground color to red (10;rgb:fff/000/000) terminated by BEL
 <ESC>]10;rgb:fff/000/000<BEL>
@@ -38,7 +38,7 @@ Hello<DEL>World
 # DCS: Device control string with final r and payload terminated by ST
 <ESC>P1$r<ESC>\
 # ESC: Escape sequence with intermediate space and final M
-<ESC>  M
+<ESC> M
 # SS3: Single shift 3 with final A (arrow key)
 <ESC>OA
 

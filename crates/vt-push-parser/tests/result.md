@@ -95,11 +95,11 @@ Csi(, '3:1', '2', '3', '4', '5', '', 'm')
 ---
 ## CSI: Cursor up with intermediate space character (final M)
 ```
-<ESC>[  M
+<ESC>[ M
 ```
 
 ```
-Csi(, '  ', 'M')
+Csi(, ' ', 'M')
 ```
 ---
 ## OSC: Set foreground color to red (10;rgb:fff/000/000) terminated by BEL
@@ -167,11 +167,11 @@ DcsStart(, '1', '$', r), data=
 ---
 ## ESC: Escape sequence with intermediate space and final M
 ```
-<ESC>  M
+<ESC> M
 ```
 
 ```
-Esc('  ', M)
+Esc(' ', M)
 ```
 ---
 ## SS3: Single shift 3 with final A (arrow key)

@@ -48,6 +48,11 @@ impl VTIntermediate {
             return false;
         }
 
+        // Invalid duplicate intermediate
+        if self.data[0] == c {
+            return false;
+        }
+
         if self.data[0] == 0 {
             self.data[0] = c;
             true
