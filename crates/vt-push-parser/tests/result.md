@@ -180,8 +180,7 @@ Esc(' ', M)
 ```
 
 ```
-Esc('', O)
-A
+Ss3('A')
 ```
 ---
 ## DCS: CSI payload

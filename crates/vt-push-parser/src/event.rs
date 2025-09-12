@@ -2,7 +2,7 @@ use std::iter::Map;
 
 use smallvec::SmallVec;
 
-use crate::{AsciiControl, BEL, CAN, CSI, DCS, ESC, OSC, ST_FINAL};
+use crate::{AsciiControl, BEL, CAN, CSI, DCS, ESC, OSC, SS2, SS3, ST_FINAL};
 
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
 pub struct VTIntermediate {
@@ -91,7 +91,7 @@ impl std::fmt::Debug for VTIntermediate {
 pub(crate) type Param = SmallVec<[u8; 32]>;
 pub(crate) type Params = SmallVec<[Param; 8]>;
 
-#[derive(PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct ParamBuf<'a> {
     pub(crate) params: &'a Params,
@@ -158,6 +158,16 @@ pub enum VTEvent<'a> {
         final_byte: u8,
     },
 
+    // SS2
+    Ss2 {
+        char: u8,
+    },
+
+    // SS3
+    Ss3 {
+        char: u8,
+    },
+
     // CSI short escape
     Csi {
         private: Option<u8>,
@@ -217,6 +227,8 @@ impl<'a> std::fmt::Debug for VTEvent<'a> {
                 write!(f, ", {})", *final_byte as char)?;
                 Ok(())
             }
+            Ss2 { char } => write!(f, "Ss2({:?})", *char as char),
+            Ss3 { char } => write!(f, "Ss3({:?})", *char as char),
             Csi {
                 private,
                 params,
@@ -312,12 +324,31 @@ impl<'a> std::fmt::Debug for VTEvent<'a> {
 }
 
 impl<'a> VTEvent<'a> {
+    pub fn csi(&self) -> Option<CSI> {
+        match self {
+            VTEvent::Csi {
+                private,
+                params,
+                intermediates,
+                final_byte,
+            } => Some(CSI {
+                private: *private,
+                params: *params,
+                intermediates: intermediates.clone(),
+                final_byte: *final_byte,
+            }),
+            _ => None,
+        }
+    }
+
     pub fn byte_len(&self) -> usize {
         use VTEvent::*;
         let len = match self {
             Raw(s) => s.len(),
             C0(_) => 1,
             Esc { intermediates, .. } => intermediates.len() + 2,
+            Ss2 { .. } => 3,
+            Ss3 { .. } => 3,
             Csi {
                 private,
                 params,
@@ -369,6 +400,16 @@ impl<'a> VTEvent<'a> {
             }
             C0(b) => {
                 buf[0] = *b;
+            }
+            Ss2 { char } => {
+                buf[0] = ESC;
+                buf[1] = SS2;
+                buf[2] = *char;
+            }
+            Ss3 { char } => {
+                buf[0] = ESC;
+                buf[1] = SS3;
+                buf[2] = *char;
             }
             Esc {
                 intermediates,
@@ -468,6 +509,8 @@ impl<'a> VTEvent<'a> {
                 intermediates: intermediates.clone(),
                 final_byte: *final_byte,
             },
+            Ss2 { char } => VTOwnedEvent::Ss2 { char: *char },
+            Ss3 { char } => VTOwnedEvent::Ss3 { char: *char },
             Csi {
                 private,
                 params,
@@ -560,6 +603,12 @@ pub enum VTOwnedEvent {
         intermediates: VTIntermediate,
         final_byte: u8,
     },
+    Ss2 {
+        char: u8,
+    },
+    Ss3 {
+        char: u8,
+    },
     Csi {
         private: Option<u8>,
         params: ParamBufOwned,
@@ -601,6 +650,8 @@ impl VTOwnedEvent {
                 intermediates: intermediates.clone(),
                 final_byte: *final_byte,
             },
+            VTOwnedEvent::Ss2 { char } => VTEvent::Ss2 { char: *char },
+            VTOwnedEvent::Ss3 { char } => VTEvent::Ss3 { char: *char },
             VTOwnedEvent::Csi {
                 private,
                 params,
@@ -634,4 +685,11 @@ impl VTOwnedEvent {
             VTOwnedEvent::OscCancel => VTEvent::OscCancel,
         }
     }
+}
+
+pub struct CSI<'a> {
+    pub private: Option<u8>,
+    pub params: ParamBuf<'a>,
+    pub intermediates: VTIntermediate,
+    pub final_byte: u8,
 }

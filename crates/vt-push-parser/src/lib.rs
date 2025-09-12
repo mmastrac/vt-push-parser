@@ -14,6 +14,8 @@ const CAN: u8 = AsciiControl::Can as _;
 const SUB: u8 = AsciiControl::Sub as _;
 const CSI: u8 = b'[';
 const OSC: u8 = b']';
+const SS2: u8 = b'N';
+const SS3: u8 = b'O';
 const DCS: u8 = b'P';
 const ST_FINAL: u8 = b'\\';
 
@@ -100,6 +102,8 @@ enum State {
     Ground,
     Escape,
     EscInt,
+    EscSs2,
+    EscSs3,
     CsiEntry,
     CsiParam,
     CsiInt,
@@ -333,14 +337,16 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
     /// the parser is in the Escape state, and will silently cancel any EscInt
     /// state.
     pub fn idle(&mut self) -> Option<VTEvent<'static>> {
-        if self.st == State::Escape {
-            self.st = State::Ground;
-            Some(VTEvent::C0(ESC))
-        } else if self.st == State::EscInt {
-            self.st = State::Ground;
-            None
-        } else {
-            None
+        match self.st {
+            State::Escape => {
+                self.st = State::Ground;
+                Some(VTEvent::C0(ESC))
+            }
+            State::EscInt | State::EscSs2 | State::EscSs3 => {
+                self.st = State::Ground;
+                None
+            }
+            _ => None,
         }
     }
 
@@ -350,6 +356,8 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
             Ground => self.on_ground(b),
             Escape => self.on_escape(b),
             EscInt => self.on_esc_int(b),
+            EscSs2 => self.on_esc_ss2(b),
+            EscSs3 => self.on_esc_ss3(b),
 
             CsiEntry => self.on_csi_entry(b),
             CsiParam => self.on_csi_param(b),
@@ -490,6 +498,14 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                 self.st = OscString;
                 VTAction::Event(VTEvent::OscStart)
             }
+            SS2 => {
+                self.st = EscSs2;
+                VTAction::None
+            }
+            SS3 => {
+                self.st = EscSs3;
+                VTAction::None
+            }
             b'X' | b'^' | b'_' => {
                 self.st = State::SosPmApcString;
                 VTAction::None
@@ -537,6 +553,24 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                 self.st = Ground;
                 VTAction::None
             }
+        }
+    }
+
+    fn on_esc_ss2(&mut self, b: u8) -> VTAction {
+        use State::*;
+        self.st = Ground;
+        match b {
+            CAN | SUB => VTAction::None,
+            c => VTAction::Event(VTEvent::Ss2 { char: c }),
+        }
+    }
+
+    fn on_esc_ss3(&mut self, b: u8) -> VTAction {
+        use State::*;
+        self.st = Ground;
+        match b {
+            CAN | SUB => VTAction::None,
+            c => VTAction::Event(VTEvent::Ss3 { char: c }),
         }
     }
 

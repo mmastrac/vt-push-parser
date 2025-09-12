@@ -25,6 +25,9 @@ fn parse(data: &[&[u8]]) -> String {
         VTEvent::Csi { .. } | VTEvent::Esc { .. } | VTEvent::C0(_) => {
             result.push(VTAccumulator::Esc(format!("{vt_input:?}")))
         }
+        VTEvent::Ss2 { .. } | VTEvent::Ss3 { .. } => {
+            result.push(VTAccumulator::Esc(format!("{vt_input:?}")))
+        }
         VTEvent::DcsStart { .. } => result.push(VTAccumulator::Dcs(format!("{vt_input:?}, data="))),
         VTEvent::DcsData(s) => {
             let VTAccumulator::Dcs(acc) = result.last_mut().unwrap() else {
