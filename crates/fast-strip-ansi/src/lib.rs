@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 
-use vt_push_parser::{VT_PARSER_INTEREST_NONE, VTEvent, VTPushParser};
+use vt_push_parser::event::VTEvent;
+use vt_push_parser::{VT_PARSER_INTEREST_NONE, VTPushParser};
 
 /// Strip ANSI escape sequences from a string. If the input contains no ANSI
 /// escape sequences, the input is returned as-is.

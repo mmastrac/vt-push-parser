@@ -6,6 +6,7 @@ pub mod signature;
 use smallvec::SmallVec;
 
 use ascii::AsciiControl;
+use event::{VTEvent, VTIntermediate};
 
 const ESC: u8 = AsciiControl::Esc as _;
 const BEL: u8 = AsciiControl::Bel as _;
@@ -20,7 +21,6 @@ const DCS: u8 = b'P';
 const ST_FINAL: u8 = b'\\';
 
 // Re-export the main types for backward compatibility
-pub use event::{VTEvent, VTIntermediate};
 pub use signature::VTEscapeSignature;
 
 use crate::event::{Param, ParamBuf, Params};

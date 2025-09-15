@@ -2,7 +2,7 @@ use std::iter::Map;
 
 use smallvec::SmallVec;
 
-use crate::{AsciiControl, BEL, CAN, CSI, DCS, ESC, OSC, SS2, SS3, ST_FINAL};
+use crate::AsciiControl;
 
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
 pub struct VTIntermediate {
@@ -384,7 +384,9 @@ impl<'a> VTEvent<'a> {
     /// Note that some events may have multiple possible encodings, so this method
     /// may decide to choose whichever is more efficient.
     pub fn encode(&self, mut buf: &mut [u8]) -> Result<usize, usize> {
+        use crate::{BEL, CAN, CSI, DCS, ESC, OSC, SS2, SS3, ST_FINAL};
         use VTEvent::*;
+
         let len = self.byte_len();
 
         if len > buf.len() {

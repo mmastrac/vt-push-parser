@@ -17,53 +17,64 @@ pub struct VTEscapeSignature {
 }
 
 impl VTEscapeSignature {
-    pub const fn csi(
-        private: Option<u8>,
-        param_count: Range<u8>,
-        intermediates: VTIntermediate,
-        final_byte: u8,
-    ) -> Self {
+    pub const fn with_private(self, private: u8) -> Self {
         Self {
-            prefix: CSI,
-            private,
-            intermediates,
-            final_byte,
-            param_count,
+            private: Some(private),
+            ..self
         }
     }
 
-    pub const fn ss3(intermediates: VTIntermediate, final_byte: u8) -> Self {
+    pub const fn with_intermediate(self, intermediate: u8) -> Self {
+        Self {
+            intermediates: VTIntermediate::one(intermediate),
+            ..self
+        }
+    }
+
+    pub const fn with_params_exact(self, param_count: u8) -> Self {
+        Self {
+            param_count: param_count..param_count + 1,
+            ..self
+        }
+    }
+
+    pub const fn csi(final_byte: u8) -> Self {
+        Self {
+            prefix: CSI,
+            final_byte,
+            param_count: 0..1,
+            intermediates: VTIntermediate::empty(),
+            private: None,
+        }
+    }
+
+    pub const fn ss3(final_byte: u8) -> Self {
         Self {
             prefix: SS3,
             private: None,
-            intermediates,
+            intermediates: VTIntermediate::empty(),
             final_byte,
-            param_count: u8::MIN..u8::MAX,
+            param_count: 0..1,
         }
     }
 
-    pub const fn dcs(
-        priv_prefix: Option<u8>,
-        param_count: Range<u8>,
-        intermediates: VTIntermediate,
-        final_byte: u8,
-    ) -> Self {
+    pub const fn dcs(final_byte: u8) -> Self {
         Self {
             prefix: DCS,
-            private: priv_prefix,
-            intermediates,
+            private: None,
+            intermediates: VTIntermediate::empty(),
             final_byte,
-            param_count,
+            param_count: 0..1,
         }
     }
 
-    pub const fn osc(intermediates: VTIntermediate, final_byte: u8) -> Self {
+    pub const fn osc(final_byte: u8) -> Self {
         Self {
             prefix: OSC,
             private: None,
-            intermediates,
+            intermediates: VTIntermediate::empty(),
             final_byte,
-            param_count: u8::MIN..u8::MAX,
+            param_count: 0..1,
         }
     }
 
@@ -113,5 +124,26 @@ impl VTEscapeSignature {
     fn const_contains(&self, len: usize) -> bool {
         // TODO: const
         self.param_count.contains(&(len as u8))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::VTPushParser;
+
+    const CURSOR_POSITION_REPORT: VTEscapeSignature =
+        VTEscapeSignature::csi(b'n').with_params_exact(2);
+
+    #[test]
+    fn test_matches() {
+        let input = b"\x1b[1;2n";
+        let mut found = false;
+        VTPushParser::decode_buffer(input, |event| {
+            assert!(!found);
+            found = true;
+            assert!(CURSOR_POSITION_REPORT.matches(&event));
+        });
+        assert!(found);
     }
 }

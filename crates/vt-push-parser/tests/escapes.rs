@@ -1,6 +1,7 @@
 use pretty_assertions::assert_eq;
 use vt_push_parser::ascii::{decode_string, encode_string};
-use vt_push_parser::{VT_PARSER_INTEREST_NONE, VTEvent, VTPushParser};
+use vt_push_parser::event::VTEvent;
+use vt_push_parser::{VT_PARSER_INTEREST_NONE, VTPushParser};
 
 const INPUT: &str = include_str!("escapes.txt");
 
