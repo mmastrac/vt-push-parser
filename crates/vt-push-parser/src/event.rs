@@ -184,13 +184,14 @@ pub enum VTEvent<'a> {
         final_byte: u8,
     },
     DcsData(&'a [u8]),
-    DcsEnd,
+    DcsEnd(&'a [u8]),
     DcsCancel,
 
     // OSC stream
     OscStart,
     OscData(&'a [u8]),
     OscEnd {
+        data: &'a [u8],
         /// Whether the BEL was used to end the OSC stream.
         used_bel: bool,
     },
@@ -277,8 +278,12 @@ impl<'a> std::fmt::Debug for VTEvent<'a> {
                 write!(f, ", {})", *final_byte as char)?;
                 Ok(())
             }
-            DcsData(s) => {
-                write!(f, "DcsData('")?;
+            DcsData(s) | DcsEnd(s) => {
+                if matches!(self, DcsEnd(..)) {
+                    write!(f, "DcsEnd('")?;
+                } else {
+                    write!(f, "DcsData('")?;
+                }
                 for chunk in s.utf8_chunks() {
                     for c in chunk.valid().chars() {
                         if let Ok(c) = AsciiControl::try_from(c) {
@@ -294,11 +299,14 @@ impl<'a> std::fmt::Debug for VTEvent<'a> {
                 write!(f, "')")?;
                 Ok(())
             }
-            DcsEnd => write!(f, "DcsEnd"),
             DcsCancel => write!(f, "DcsCancel"),
             OscStart => write!(f, "OscStart"),
-            OscData(s) => {
-                write!(f, "OscData('")?;
+            OscData(s) | OscEnd { data: s, .. } => {
+                if matches!(self, OscEnd { .. }) {
+                    write!(f, "OscEnd('")?;
+                } else {
+                    write!(f, "OscData('")?;
+                }
                 for chunk in s.utf8_chunks() {
                     for c in chunk.valid().chars() {
                         if let Ok(c) = AsciiControl::try_from(c) {
@@ -312,10 +320,6 @@ impl<'a> std::fmt::Debug for VTEvent<'a> {
                     }
                 }
                 write!(f, "')")?;
-                Ok(())
-            }
-            OscEnd { .. } => {
-                write!(f, "OscEnd")?;
                 Ok(())
             }
             OscCancel => write!(f, "OscCancel"),
@@ -362,15 +366,15 @@ impl<'a> VTEvent<'a> {
                 ..
             } => private.is_some() as usize + params.byte_len() + intermediates.byte_len() + 3,
             DcsData(s) => s.len(),
-            DcsEnd => 2,
+            DcsEnd(s) => s.len() + 2,
             DcsCancel => 1,
             OscStart => 2,
             OscData(s) => s.len(),
-            OscEnd { used_bel } => {
+            OscEnd { data, used_bel } => {
                 if *used_bel {
-                    1
+                    data.len() + 1
                 } else {
-                    2
+                    data.len() + 2
                 }
             }
             OscCancel => 1,
@@ -478,7 +482,9 @@ impl<'a> VTEvent<'a> {
                     .copy_from_slice(&intermediates.data[..intermediates.len()]);
                 buf[intermediates.len()] = *final_byte;
             }
-            DcsEnd => {
+            DcsEnd(data) => {
+                buf[..data.len()].copy_from_slice(data);
+                buf = &mut buf[data.len()..];
                 buf[0] = ESC;
                 buf[1] = ST_FINAL;
             }
@@ -486,7 +492,9 @@ impl<'a> VTEvent<'a> {
                 buf[0] = ESC;
                 buf[1] = OSC;
             }
-            OscEnd { used_bel } => {
+            OscEnd { data, used_bel } => {
+                buf[..data.len()].copy_from_slice(data);
+                buf = &mut buf[data.len()..];
                 if *used_bel {
                     buf[0] = BEL;
                 } else {
@@ -536,11 +544,12 @@ impl<'a> VTEvent<'a> {
                 final_byte: *final_byte,
             },
             DcsData(s) => VTOwnedEvent::DcsData(s.to_vec()),
-            DcsEnd => VTOwnedEvent::DcsEnd,
+            DcsEnd(s) => VTOwnedEvent::DcsEnd(s.to_vec()),
             DcsCancel => VTOwnedEvent::DcsCancel,
             OscStart => VTOwnedEvent::OscStart,
             OscData(s) => VTOwnedEvent::OscData(s.to_vec()),
-            OscEnd { used_bel } => VTOwnedEvent::OscEnd {
+            OscEnd { data, used_bel } => VTOwnedEvent::OscEnd {
+                data: data.to_vec(),
                 used_bel: *used_bel,
             },
             OscCancel => VTOwnedEvent::OscCancel,
@@ -624,11 +633,12 @@ pub enum VTOwnedEvent {
         final_byte: u8,
     },
     DcsData(Vec<u8>),
-    DcsEnd,
+    DcsEnd(Vec<u8>),
     DcsCancel,
     OscStart,
     OscData(Vec<u8>),
     OscEnd {
+        data: Vec<u8>,
         used_bel: bool,
     },
     OscCancel,
@@ -677,11 +687,12 @@ impl VTOwnedEvent {
                 final_byte: *final_byte,
             },
             VTOwnedEvent::DcsData(s) => VTEvent::DcsData(s),
-            VTOwnedEvent::DcsEnd => VTEvent::DcsEnd,
+            VTOwnedEvent::DcsEnd(s) => VTEvent::DcsEnd(s),
             VTOwnedEvent::DcsCancel => VTEvent::DcsCancel,
             VTOwnedEvent::OscStart => VTEvent::OscStart,
             VTOwnedEvent::OscData(s) => VTEvent::OscData(s),
-            VTOwnedEvent::OscEnd { used_bel } => VTEvent::OscEnd {
+            VTOwnedEvent::OscEnd { data, used_bel } => VTEvent::OscEnd {
+                data: data,
                 used_bel: *used_bel,
             },
             VTOwnedEvent::OscCancel => VTEvent::OscCancel,

@@ -12,56 +12,122 @@ enum VTAccumulator {
     Osc(String),
 }
 
-fn parse(data: &[&[u8]]) -> String {
-    let mut parser = VTPushParser::new();
-    let mut result = Vec::new();
-    let mut callback = |vt_input: VTEvent<'_>| match vt_input {
-        VTEvent::Raw(s) => {
-            if let Some(VTAccumulator::Raw(acc)) = result.last_mut() {
-                acc.push_str(&encode_string(s));
-            } else {
-                result.push(VTAccumulator::Raw(encode_string(s)));
-            }
-        }
-        VTEvent::Csi { .. } | VTEvent::Esc { .. } | VTEvent::C0(_) => {
-            result.push(VTAccumulator::Esc(format!("{vt_input:?}")))
-        }
-        VTEvent::Ss2 { .. } | VTEvent::Ss3 { .. } => {
-            result.push(VTAccumulator::Esc(format!("{vt_input:?}")))
-        }
-        VTEvent::DcsStart { .. } => result.push(VTAccumulator::Dcs(format!("{vt_input:?}, data="))),
-        VTEvent::DcsData(s) => {
-            let VTAccumulator::Dcs(acc) = result.last_mut().unwrap() else {
-                panic!("DcsData without DcsStart");
+macro_rules! callback {
+    ($result:ident, $ret:expr) => {
+        |vt_input: VTEvent<'_>| {
+            let result = &mut $result;
+            match vt_input {
+                VTEvent::Raw(s) => {
+                    if let Some(VTAccumulator::Raw(acc)) = result.last_mut() {
+                        acc.push_str(&encode_string(s));
+                    } else {
+                        result.push(VTAccumulator::Raw(encode_string(s)));
+                    }
+                }
+                VTEvent::Csi { .. } | VTEvent::Esc { .. } | VTEvent::C0(_) => {
+                    result.push(VTAccumulator::Esc(format!("{vt_input:?}")))
+                }
+                VTEvent::Ss2 { .. } | VTEvent::Ss3 { .. } => {
+                    result.push(VTAccumulator::Esc(format!("{vt_input:?}")))
+                }
+                VTEvent::DcsStart { .. } => {
+                    result.push(VTAccumulator::Dcs(format!("{vt_input:?}, data=")))
+                }
+                VTEvent::DcsData(s) | VTEvent::DcsEnd(s) => {
+                    let VTAccumulator::Dcs(acc) = result.last_mut().unwrap() else {
+                        panic!("DcsData without DcsStart");
+                    };
+                    acc.push_str(&encode_string(s));
+                }
+                VTEvent::DcsCancel => {
+                    let VTAccumulator::Dcs(acc) = result.last_mut().unwrap() else {
+                        panic!("DcsCancel without DcsStart");
+                    };
+                    *acc = format!("{} (cancelled)", acc.split_once(", data=").unwrap().0);
+                }
+                VTEvent::OscStart => result.push(VTAccumulator::Osc("OscStart, data=".to_string())),
+                VTEvent::OscData(s) | VTEvent::OscEnd { data: s, .. } => {
+                    let VTAccumulator::Osc(acc) = result.last_mut().unwrap() else {
+                        panic!("OscData without OscStart");
+                    };
+                    acc.push_str(&encode_string(s));
+                }
+                VTEvent::OscCancel => {
+                    let VTAccumulator::Osc(acc) = result.last_mut().unwrap() else {
+                        panic!("OscCancel without OscStart");
+                    };
+                    *acc = format!("{} (cancelled)", acc.split_once(", data=").unwrap().0);
+                }
             };
-            acc.push_str(&encode_string(s));
-        }
-        VTEvent::DcsEnd => {}
-        VTEvent::DcsCancel => {
-            let VTAccumulator::Dcs(acc) = result.last_mut().unwrap() else {
-                panic!("DcsCancel without DcsStart");
-            };
-            *acc = format!("{} (cancelled)", acc.split_once(", data=").unwrap().0);
-        }
-        VTEvent::OscStart => result.push(VTAccumulator::Osc("OscStart, data=".to_string())),
-        VTEvent::OscData(s) => {
-            let VTAccumulator::Osc(acc) = result.last_mut().unwrap() else {
-                panic!("OscData without OscStart");
-            };
-            acc.push_str(&encode_string(s));
-        }
-        VTEvent::OscEnd { .. } => {}
-        VTEvent::OscCancel => {
-            let VTAccumulator::Osc(acc) = result.last_mut().unwrap() else {
-                panic!("OscCancel without OscStart");
-            };
-            *acc = format!("{} (cancelled)", acc.split_once(", data=").unwrap().0);
+            $ret
         }
     };
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ParseMode {
+    Normal,
+    Abortable,
+    Aborted,
+}
+
+impl ParseMode {
+    pub fn all() -> &'static [ParseMode] {
+        return &[ParseMode::Normal, ParseMode::Abortable, ParseMode::Aborted];
+    }
+}
+
+fn parse(mode: ParseMode, data: &[&[u8]]) -> String {
+    match mode {
+        ParseMode::Normal => parse_normal(data),
+        ParseMode::Abortable => parse_abortable(data),
+        ParseMode::Aborted => parse_aborted(data),
+    }
+}
+
+fn parse_normal(data: &[&[u8]]) -> String {
+    let mut parser = VTPushParser::new();
+    let mut result = Vec::new();
+    let mut callback = callback!(result, ());
     for chunk in data {
         parser.feed_with(chunk, &mut callback);
     }
+    collect(result)
+}
 
+fn parse_abortable(data: &[&[u8]]) -> String {
+    let mut parser = VTPushParser::new();
+    let mut result = Vec::new();
+    let mut callback = callback!(result, true);
+    for chunk in data {
+        assert_eq!(
+            parser.feed_with_abortable(chunk, &mut callback),
+            chunk.len()
+        );
+    }
+    collect(result)
+}
+
+fn parse_aborted(data: &[&[u8]]) -> String {
+    let mut parser = VTPushParser::new();
+    let mut result = Vec::new();
+    let mut callback = callback!(result, false);
+    for chunk in data {
+        let mut chunk = *chunk;
+        while !chunk.is_empty() {
+            let parsed = parser.feed_with_abortable(chunk, &mut callback);
+            assert!(
+                parsed <= chunk.len(),
+                "Invalid return value for {chunk:?}: {parsed} should be <= {}",
+                chunk.len()
+            );
+            chunk = &chunk[parsed..];
+        }
+    }
+    collect(result)
+}
+
+fn collect(result: Vec<VTAccumulator>) -> String {
     let mut result_string = String::new();
     for acc in result {
         match acc {
@@ -76,7 +142,16 @@ fn parse(data: &[&[u8]]) -> String {
 }
 
 fn test(output: &mut String, test_name: &str, line: &str, decoded: &[u8]) {
-    let result = parse(&[decoded]);
+    let result = parse(ParseMode::Normal, &[decoded]);
+
+    // Ensure the result is the same when stepping forward with a cancellable parser
+    let result_abortable = parse(ParseMode::Abortable, &[decoded]);
+    assert_eq!(result, result_abortable);
+    let result_aborted = parse(ParseMode::Aborted, &[decoded]);
+    assert_eq!(
+        result, result_aborted,
+        "Stepped parser should yield the same results"
+    );
 
     // Ensure that the result is the same no matter what interest flags are set
     let mut text_content = String::new();
@@ -96,46 +171,50 @@ fn test(output: &mut String, test_name: &str, line: &str, decoded: &[u8]) {
     });
     assert_eq!(text_content, text_content_interest_none);
 
-    // Ensure that the result is the same when parsing in various chunk sizes
-    for chunk_size in 1..=decoded.len() {
-        let mut byte_by_byte = Vec::new();
-        for b in decoded.chunks(chunk_size) {
-            byte_by_byte.push(b);
+    for mode in ParseMode::all().iter().cloned() {
+        // Ensure that the result is the same when parsing in various chunk sizes
+        for chunk_size in 1..=decoded.len() {
+            let mut byte_by_byte = Vec::new();
+            for b in decoded.chunks(chunk_size) {
+                byte_by_byte.push(b);
+            }
+            let result_byte_by_byte = parse(mode, &byte_by_byte);
+            assert_eq!(
+                result,
+                result_byte_by_byte,
+                "Failed to parse in chunks of size {chunk_size} ({:02X?})",
+                decoded.chunks(chunk_size).collect::<Vec<_>>()
+            );
         }
-        let result_byte_by_byte = parse(&byte_by_byte);
-        assert_eq!(
-            result, result_byte_by_byte,
-            "Failed to parse in chunks of size {chunk_size}"
-        );
-    }
 
-    // Ensure that prefix and suffix to each side of the decoded data are parsed
-    // correctly. This should probably be more of a fuzz test instead.
-    let result_prefix = parse(&[b"prefix", decoded]);
-    let e1 = format!("prefix\n{result}");
-    let e2 = format!("prefix{result}");
-    if result_prefix != e1 && result_prefix != e2 {
-        panic!(
-            "Prefix string did not match expectations:\n{result_prefix}\nExpected one of:\n{e1}\n-- or --\n\n{e2}"
-        );
-    }
+        // Ensure that prefix and suffix to each side of the decoded data are parsed
+        // correctly. This should probably be more of a fuzz test instead.
+        let result_prefix = parse(mode, &[b"prefix", decoded]);
+        let e1 = format!("prefix\n{result}");
+        let e2 = format!("prefix{result}");
+        if result_prefix != e1 && result_prefix != e2 {
+            panic!(
+                "Prefix string did not match expectations:\n{result_prefix}\nExpected one of:\n{e1}\n-- or --\n\n{e2}"
+            );
+        }
 
-    let result_suffix = parse(&[decoded, b"suffix"]);
-    let e1 = format!("{result}suffix\n");
-    let e2 = format!("{}suffix\n", result.trim_end());
-    if result_suffix != e1 && result_suffix != e2 {
-        panic!(
-            "Suffix string did not match expectations:\n{result_suffix}\nExpected one of:\n{e1}\n-- or --\n\n{e2}"
-        );
-    }
+        let result_suffix = parse(mode, &[decoded, b"suffix"]);
+        let e1 = format!("{result}suffix\n");
+        let e2 = format!("{}suffix\n", result.trim_end());
+        if result_suffix != e1 && result_suffix != e2 {
+            panic!(
+                "Suffix string did not match expectations:\n{result_suffix}\nExpected one of:\n{e1}\n-- or --\n\n{e2}"
+            );
+        }
 
-    let result_prefix = parse(&["✅🛜".as_bytes(), decoded]);
-    let e1 = format!("✅🛜\n{result}");
-    let e2 = format!("✅🛜{result}");
-    if result_prefix != e1 && result_prefix != e2 {
-        panic!(
-            "Prefix string did not match expectations:\n{result_prefix}\nExpected one of:\n{e1}\n-- or --\n\n{e2}"
-        );
+        let result_prefix = parse(mode, &["✅🛜".as_bytes(), decoded]);
+        let e1 = format!("✅🛜\n{result}");
+        let e2 = format!("✅🛜{result}");
+        if result_prefix != e1 && result_prefix != e2 {
+            panic!(
+                "Prefix string did not match expectations:\n{result_prefix}\nExpected one of:\n{e1}\n-- or --\n\n{e2}"
+            );
+        }
     }
 
     // Ensure that the re-encoded result is the same as the original

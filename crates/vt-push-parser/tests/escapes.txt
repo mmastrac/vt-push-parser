@@ -23,6 +23,8 @@ Hello<DEL>World
 # CSI: Cursor up with intermediate space character (final M)
 <ESC>[ M
 
+# OSC: Two OSC in a row
+<ESC>]1;<ESC>\<ESC>]1;<ESC>\
 # OSC: Set foreground color to red (10;rgb:fff/000/000) terminated by BEL
 <ESC>]10;rgb:fff/000/000<BEL>
 # OSC: Set background color to green (11;rgb:000/fff/000) terminated by ST
@@ -113,3 +115,10 @@ Hello<ESC>P:1;2;3|data<ESC>\World
 <ESC>[38:5:15;m
 # CSI: Only colon param (no numeric params)
 <ESC>[38:2:1:2:3m
+
+# OSC: DEL ignored inside
+<ESC>]11;rgb:000<DEL>/fff/000<ESC>\
+# DCS: DEL ignored inside
+<ESC>P1;2;3|<DEL><ESC><ESC>data<ESC>\
+# DCS: DEL ignored inside after double escape
+<ESC>P1;2;3|<ESC><ESC><DEL>data<ESC>\

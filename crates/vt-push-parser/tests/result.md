@@ -102,6 +102,16 @@ Csi(, '3:1', '2', '3', '4', '5', '', 'm')
 Csi(, ' ', 'M')
 ```
 ---
+## OSC: Two OSC in a row
+```
+<ESC>]1;<ESC>\<ESC>]1;<ESC>\
+```
+
+```
+OscStart, data=1;
+OscStart, data=1;
+```
+---
 ## OSC: Set foreground color to red (10;rgb:fff/000/000) terminated by BEL
 ```
 <ESC>]10;rgb:fff/000/000<BEL>
@@ -476,5 +486,32 @@ Csi(, '38:5:15', '', '', 'm')
 
 ```
 Csi(, '38:2:1:2:3', '', 'm')
+```
+---
+## OSC: DEL ignored inside
+```
+<ESC>]11;rgb:000<DEL>/fff/000<ESC>\
+```
+
+```
+OscStart, data=11;rgb:000/fff/000
+```
+---
+## DCS: DEL ignored inside
+```
+<ESC>P1;2;3|<DEL><ESC><ESC>data<ESC>\
+```
+
+```
+DcsStart(, '1', '2', '3', '', |), data=<ESC><ESC>data
+```
+---
+## DCS: DEL ignored inside after double escape
+```
+<ESC>P1;2;3|<ESC><ESC><DEL>data<ESC>\
+```
+
+```
+DcsStart(, '1', '2', '3', '', |), data=<ESC><ESC>data
 ```
 ---
