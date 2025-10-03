@@ -4,6 +4,37 @@ use smallvec::SmallVec;
 
 use crate::AsciiControl;
 
+/// Helper function to format UTF-8 chunks with ASCII control character handling
+fn fmt_utf8_bytes_with_ascii_control(
+    f: &mut std::fmt::Formatter<'_>,
+    bytes: &[u8],
+) -> std::fmt::Result {
+    for chunk in bytes.utf8_chunks() {
+        for c in chunk.valid().chars() {
+            if let Ok(c) = AsciiControl::try_from(c) {
+                write!(f, "{}", c)?;
+            } else {
+                write!(f, "{}", c)?;
+            }
+        }
+        if !chunk.invalid().is_empty() {
+            write!(f, "<{}>", hex::encode(chunk.invalid()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Helper function to format UTF-8 chunks for parameters (simple formatting)
+fn fmt_utf8_bytes_simple(f: &mut std::fmt::Formatter<'_>, bytes: &[u8]) -> std::fmt::Result {
+    for chunk in bytes.utf8_chunks() {
+        write!(f, "{}", chunk.valid())?;
+        if !chunk.invalid().is_empty() {
+            write!(f, "<{}>", hex::encode(chunk.invalid()))?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
 pub struct VTIntermediate {
@@ -191,106 +222,23 @@ impl<'a> std::fmt::Debug for VTEvent<'a> {
         match self {
             Raw(s) => {
                 write!(f, "Raw('")?;
-                for chunk in s.utf8_chunks() {
-                    for c in chunk.valid().chars() {
-                        if let Ok(c) = AsciiControl::try_from(c) {
-                            write!(f, "{}", c)?;
-                        } else {
-                            write!(f, "{}", c)?;
-                        }
-                    }
-                    if !chunk.invalid().is_empty() {
-                        write!(f, "<{}>", hex::encode(chunk.invalid()))?;
-                    }
-                }
+                fmt_utf8_bytes_with_ascii_control(f, s)?;
                 write!(f, "')")?;
                 Ok(())
             }
             C0(b) => write!(f, "C0({:02x})", b),
-            Esc(esc) => {
-                write!(f, "Esc({:?}", esc.intermediates)?;
-                write!(f, ", ")?;
-                if let Ok(c) = AsciiControl::try_from(esc.final_byte as char) {
-                    write!(f, "{})", c)?;
-                } else {
-                    write!(f, "{})", esc.final_byte as char)?;
-                }
-                Ok(())
-            }
-            Ss2(ss2) => {
-                write!(f, "Ss2(")?;
-                if let Ok(c) = AsciiControl::try_from(ss2.char as char) {
-                    write!(f, "{})", c)?;
-                } else {
-                    write!(f, "{:?})", ss2.char as char)?;
-                }
-                Ok(())
-            }
-            Ss3(ss3) => {
-                write!(f, "Ss3(")?;
-                if let Ok(c) = AsciiControl::try_from(ss3.char as char) {
-                    write!(f, "{})", c)?;
-                } else {
-                    write!(f, "{:?})", ss3.char as char)?;
-                }
-                Ok(())
-            }
-            Csi(csi) => {
-                write!(f, "Csi(")?;
-                if let Some(p) = csi.private {
-                    write!(f, "{:?}", p as char)?;
-                }
-                for param in csi.params {
-                    write!(f, ", '")?;
-                    for chunk in param.utf8_chunks() {
-                        write!(f, "{}", chunk.valid())?;
-                        if !chunk.invalid().is_empty() {
-                            write!(f, "<{}>", hex::encode(chunk.invalid()))?;
-                        }
-                    }
-                    write!(f, "'")?;
-                }
-                write!(f, ", {:?}", csi.intermediates)?;
-                write!(f, ", {:?})", csi.final_byte as char)?;
-                Ok(())
-            }
-            DcsStart(dcs_start) => {
-                write!(f, "DcsStart(")?;
-                if let Some(p) = dcs_start.private {
-                    write!(f, "{:?}", p as char)?;
-                }
-                for param in dcs_start.params {
-                    write!(f, ", '")?;
-                    for chunk in param.utf8_chunks() {
-                        write!(f, "{}", chunk.valid())?;
-                        if !chunk.invalid().is_empty() {
-                            write!(f, "<{}>", hex::encode(chunk.invalid()))?;
-                        }
-                    }
-                    write!(f, "'")?;
-                }
-                write!(f, ", {:?}", dcs_start.intermediates)?;
-                write!(f, ", {})", dcs_start.final_byte as char)?;
-                Ok(())
-            }
+            Esc(esc) => esc.fmt(f),
+            Ss2(ss2) => ss2.fmt(f),
+            Ss3(ss3) => ss3.fmt(f),
+            Csi(csi) => csi.fmt(f),
+            DcsStart(dcs_start) => dcs_start.fmt(f),
             DcsData(s) | DcsEnd(s) => {
                 if matches!(self, DcsEnd(..)) {
                     write!(f, "DcsEnd('")?;
                 } else {
                     write!(f, "DcsData('")?;
                 }
-                for chunk in s.utf8_chunks() {
-                    for c in chunk.valid().chars() {
-                        if let Ok(c) = AsciiControl::try_from(c) {
-                            write!(f, "{}", c)?;
-                        } else {
-                            write!(f, "{}", c)?;
-                        }
-                    }
-                    if !chunk.invalid().is_empty() {
-                        write!(f, "<{}>", hex::encode(chunk.invalid()))?;
-                    }
-                }
+                fmt_utf8_bytes_with_ascii_control(f, s)?;
                 write!(f, "')")?;
                 Ok(())
             }
@@ -302,18 +250,7 @@ impl<'a> std::fmt::Debug for VTEvent<'a> {
                 } else {
                     write!(f, "OscData('")?;
                 }
-                for chunk in s.utf8_chunks() {
-                    for c in chunk.valid().chars() {
-                        if let Ok(c) = AsciiControl::try_from(c) {
-                            write!(f, "{}", c)?;
-                        } else {
-                            write!(f, "{}", c)?;
-                        }
-                    }
-                    if !chunk.invalid().is_empty() {
-                        write!(f, "<{}>", hex::encode(chunk.invalid()))?;
-                    }
-                }
+                fmt_utf8_bytes_with_ascii_control(f, s)?;
                 write!(f, "')")?;
                 Ok(())
             }
@@ -632,26 +569,63 @@ impl VTOwnedEvent {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Esc {
     pub intermediates: VTIntermediate,
     pub final_byte: u8,
 }
 
+impl std::fmt::Debug for Esc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Esc({:?}", self.intermediates)?;
+        write!(f, ", ")?;
+        if let Ok(c) = AsciiControl::try_from(self.final_byte as char) {
+            write!(f, "{})", c)?;
+        } else {
+            write!(f, "{})", self.final_byte as char)?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct SS2 {
     pub char: u8,
 }
 
+impl std::fmt::Debug for SS2 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Ss2(")?;
+        if let Ok(c) = AsciiControl::try_from(self.char as char) {
+            write!(f, "{})", c)?;
+        } else {
+            write!(f, "{:?})", self.char as char)?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct SS3 {
     pub char: u8,
 }
 
+impl std::fmt::Debug for SS3 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Ss3(")?;
+        if let Ok(c) = AsciiControl::try_from(self.char as char) {
+            write!(f, "{})", c)?;
+        } else {
+            write!(f, "{:?})", self.char as char)?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CSI<'a> {
     pub private: Option<u8>,
     pub params: ParamBuf<'a>,
@@ -659,8 +633,25 @@ pub struct CSI<'a> {
     pub final_byte: u8,
 }
 
+impl<'a> std::fmt::Debug for CSI<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Csi(")?;
+        if let Some(p) = self.private {
+            write!(f, "{:?}", p as char)?;
+        }
+        for param in &self.params {
+            write!(f, ", '")?;
+            fmt_utf8_bytes_simple(f, param)?;
+            write!(f, "'")?;
+        }
+        write!(f, ", {:?}", self.intermediates)?;
+        write!(f, ", {:?})", self.final_byte as char)?;
+        Ok(())
+    }
+}
+
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DCS<'a> {
     pub private: Option<u8>,
     pub params: ParamBuf<'a>,
@@ -668,8 +659,25 @@ pub struct DCS<'a> {
     pub final_byte: u8,
 }
 
+impl<'a> std::fmt::Debug for DCS<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DcsStart(")?;
+        if let Some(p) = self.private {
+            write!(f, "{:?}", p as char)?;
+        }
+        for param in &self.params {
+            write!(f, ", '")?;
+            fmt_utf8_bytes_simple(f, param)?;
+            write!(f, "'")?;
+        }
+        write!(f, ", {:?}", self.intermediates)?;
+        write!(f, ", {})", self.final_byte as char)?;
+        Ok(())
+    }
+}
+
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CSIOwned {
     pub private: Option<u8>,
     pub params: ParamBufOwned,
@@ -677,11 +685,45 @@ pub struct CSIOwned {
     pub final_byte: u8,
 }
 
+impl std::fmt::Debug for CSIOwned {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Csi(")?;
+        if let Some(p) = self.private {
+            write!(f, "{:?}", p as char)?;
+        }
+        for param in &self.params {
+            write!(f, ", '")?;
+            fmt_utf8_bytes_simple(f, param)?;
+            write!(f, "'")?;
+        }
+        write!(f, ", {:?}", self.intermediates)?;
+        write!(f, ", {:?})", self.final_byte as char)?;
+        Ok(())
+    }
+}
+
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DCSOwned {
     pub private: Option<u8>,
     pub params: ParamBufOwned,
     pub intermediates: VTIntermediate,
     pub final_byte: u8,
+}
+
+impl std::fmt::Debug for DCSOwned {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DcsStart(")?;
+        if let Some(p) = self.private {
+            write!(f, "{:?}", p as char)?;
+        }
+        for param in &self.params {
+            write!(f, ", '")?;
+            fmt_utf8_bytes_simple(f, param)?;
+            write!(f, "'")?;
+        }
+        write!(f, ", {:?}", self.intermediates)?;
+        write!(f, ", {})", self.final_byte as char)?;
+        Ok(())
+    }
 }
