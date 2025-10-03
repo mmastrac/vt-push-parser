@@ -81,33 +81,22 @@ impl VTEscapeSignature {
     pub fn matches(&self, entry: &VTEvent) -> bool {
         // TODO: const
         match entry {
-            VTEvent::Esc {
-                intermediates,
-                final_byte,
-            } => self.final_byte == *final_byte && self.intermediates.const_eq(intermediates),
-            VTEvent::Csi {
-                private,
-                params,
-                intermediates,
-                final_byte,
-            } => {
-                self.prefix == CSI
-                    && self.final_byte == *final_byte
-                    && self.intermediates.const_eq(intermediates)
-                    && self.const_private_eq(private)
-                    && self.const_contains(params.len())
+            VTEvent::Esc(esc) => {
+                self.final_byte == esc.final_byte && self.intermediates.const_eq(&esc.intermediates)
             }
-            VTEvent::DcsStart {
-                private,
-                params,
-                intermediates,
-                final_byte,
-            } => {
+            VTEvent::Csi(csi) => {
+                self.prefix == CSI
+                    && self.final_byte == csi.final_byte
+                    && self.intermediates.const_eq(&csi.intermediates)
+                    && self.const_private_eq(&csi.private)
+                    && self.const_contains(csi.params.len())
+            }
+            VTEvent::DcsStart(dcs_start) => {
                 self.prefix == DCS
-                    && self.final_byte == *final_byte
-                    && self.intermediates.const_eq(intermediates)
-                    && self.private == *private
-                    && self.const_contains(params.len())
+                    && self.final_byte == dcs_start.final_byte
+                    && self.intermediates.const_eq(&dcs_start.intermediates)
+                    && self.private == dcs_start.private
+                    && self.const_contains(dcs_start.params.len())
             }
             _ => false,
         }

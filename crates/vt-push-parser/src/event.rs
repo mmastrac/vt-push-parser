@@ -157,36 +157,19 @@ pub enum VTEvent<'a> {
     C0(u8),
 
     // ESC final (with intermediates)
-    Esc {
-        intermediates: VTIntermediate,
-        final_byte: u8,
-    },
+    Esc(Esc),
 
     // SS2
-    Ss2 {
-        char: u8,
-    },
+    Ss2(SS2),
 
     // SS3
-    Ss3 {
-        char: u8,
-    },
+    Ss3(SS3),
 
     // CSI short escape
-    Csi {
-        private: Option<u8>,
-        params: ParamBuf<'a>,
-        intermediates: VTIntermediate,
-        final_byte: u8,
-    },
+    Csi(CSI<'a>),
 
     // DCS stream
-    DcsStart {
-        private: Option<u8>,
-        params: ParamBuf<'a>,
-        intermediates: VTIntermediate,
-        final_byte: u8,
-    },
+    DcsStart(DCS<'a>),
     DcsData(&'a [u8]),
     DcsEnd(&'a [u8]),
     DcsCancel,
@@ -224,48 +207,40 @@ impl<'a> std::fmt::Debug for VTEvent<'a> {
                 Ok(())
             }
             C0(b) => write!(f, "C0({:02x})", b),
-            Esc {
-                intermediates,
-                final_byte,
-            } => {
-                write!(f, "Esc({:?}", intermediates)?;
+            Esc(esc) => {
+                write!(f, "Esc({:?}", esc.intermediates)?;
                 write!(f, ", ")?;
-                if let Ok(c) = AsciiControl::try_from(*final_byte as char) {
+                if let Ok(c) = AsciiControl::try_from(esc.final_byte as char) {
                     write!(f, "{})", c)?;
                 } else {
-                    write!(f, "{})", *final_byte as char)?;
+                    write!(f, "{})", esc.final_byte as char)?;
                 }
                 Ok(())
             }
-            Ss2 { char } => {
+            Ss2(ss2) => {
                 write!(f, "Ss2(")?;
-                if let Ok(c) = AsciiControl::try_from(*char as char) {
+                if let Ok(c) = AsciiControl::try_from(ss2.char as char) {
                     write!(f, "{})", c)?;
                 } else {
-                    write!(f, "{:?})", *char as char)?;
+                    write!(f, "{:?})", ss2.char as char)?;
                 }
                 Ok(())
             }
-            Ss3 { char } => {
+            Ss3(ss3) => {
                 write!(f, "Ss3(")?;
-                if let Ok(c) = AsciiControl::try_from(*char as char) {
+                if let Ok(c) = AsciiControl::try_from(ss3.char as char) {
                     write!(f, "{})", c)?;
                 } else {
-                    write!(f, "{:?})", *char as char)?;
+                    write!(f, "{:?})", ss3.char as char)?;
                 }
                 Ok(())
             }
-            Csi {
-                private,
-                params,
-                intermediates,
-                final_byte,
-            } => {
+            Csi(csi) => {
                 write!(f, "Csi(")?;
-                if let Some(p) = private {
-                    write!(f, "{:?}", *p as char)?;
+                if let Some(p) = csi.private {
+                    write!(f, "{:?}", p as char)?;
                 }
-                for param in params {
+                for param in csi.params {
                     write!(f, ", '")?;
                     for chunk in param.utf8_chunks() {
                         write!(f, "{}", chunk.valid())?;
@@ -275,21 +250,16 @@ impl<'a> std::fmt::Debug for VTEvent<'a> {
                     }
                     write!(f, "'")?;
                 }
-                write!(f, ", {:?}", intermediates)?;
-                write!(f, ", {:?})", *final_byte as char)?;
+                write!(f, ", {:?}", csi.intermediates)?;
+                write!(f, ", {:?})", csi.final_byte as char)?;
                 Ok(())
             }
-            DcsStart {
-                private,
-                params,
-                intermediates,
-                final_byte,
-            } => {
+            DcsStart(dcs_start) => {
                 write!(f, "DcsStart(")?;
-                if let Some(p) = private {
-                    write!(f, "{:?}", *p as char)?;
+                if let Some(p) = dcs_start.private {
+                    write!(f, "{:?}", p as char)?;
                 }
-                for param in params {
+                for param in dcs_start.params {
                     write!(f, ", '")?;
                     for chunk in param.utf8_chunks() {
                         write!(f, "{}", chunk.valid())?;
@@ -299,8 +269,8 @@ impl<'a> std::fmt::Debug for VTEvent<'a> {
                     }
                     write!(f, "'")?;
                 }
-                write!(f, ", {:?}", intermediates)?;
-                write!(f, ", {})", *final_byte as char)?;
+                write!(f, ", {:?}", dcs_start.intermediates)?;
+                write!(f, ", {})", dcs_start.final_byte as char)?;
                 Ok(())
             }
             DcsData(s) | DcsEnd(s) => {
@@ -355,16 +325,11 @@ impl<'a> std::fmt::Debug for VTEvent<'a> {
 impl<'a> VTEvent<'a> {
     pub fn csi(&self) -> Option<CSI> {
         match self {
-            VTEvent::Csi {
-                private,
-                params,
-                intermediates,
-                final_byte,
-            } => Some(CSI {
-                private: *private,
-                params: *params,
-                intermediates: intermediates.clone(),
-                final_byte: *final_byte,
+            VTEvent::Csi(csi) => Some(CSI {
+                private: csi.private,
+                params: csi.params,
+                intermediates: csi.intermediates.clone(),
+                final_byte: csi.final_byte,
             }),
             _ => None,
         }
@@ -375,21 +340,21 @@ impl<'a> VTEvent<'a> {
         let len = match self {
             Raw(s) => s.len(),
             C0(_) => 1,
-            Esc { intermediates, .. } => intermediates.len() + 2,
-            Ss2 { .. } => 3,
-            Ss3 { .. } => 3,
-            Csi {
-                private,
-                params,
-                intermediates,
-                ..
-            } => private.is_some() as usize + params.byte_len() + intermediates.byte_len() + 3,
-            DcsStart {
-                private,
-                params,
-                intermediates,
-                ..
-            } => private.is_some() as usize + params.byte_len() + intermediates.byte_len() + 3,
+            Esc(esc) => esc.intermediates.len() + 2,
+            Ss2(_) => 3,
+            Ss3(_) => 3,
+            Csi(csi) => {
+                csi.private.is_some() as usize
+                    + csi.params.byte_len()
+                    + csi.intermediates.byte_len()
+                    + 3
+            }
+            DcsStart(dcs_start) => {
+                dcs_start.private.is_some() as usize
+                    + dcs_start.params.byte_len()
+                    + dcs_start.intermediates.byte_len()
+                    + 3
+            }
             DcsData(s) => s.len(),
             DcsEnd(s) => s.len() + 2,
             DcsCancel => 1,
@@ -432,39 +397,31 @@ impl<'a> VTEvent<'a> {
             C0(b) => {
                 buf[0] = *b;
             }
-            Ss2 { char } => {
+            Ss2(ss2) => {
                 buf[0] = ESC;
                 buf[1] = SS2;
-                buf[2] = *char;
+                buf[2] = ss2.char;
             }
-            Ss3 { char } => {
+            Ss3(ss3) => {
                 buf[0] = ESC;
                 buf[1] = SS3;
-                buf[2] = *char;
+                buf[2] = ss3.char;
             }
-            Esc {
-                intermediates,
-                final_byte,
-            } => {
+            Esc(esc) => {
                 buf[0] = ESC;
-                buf[1..intermediates.len() + 1]
-                    .copy_from_slice(&intermediates.data[..intermediates.len()]);
-                buf[intermediates.len() + 1] = *final_byte;
+                buf[1..esc.intermediates.len() + 1]
+                    .copy_from_slice(&esc.intermediates.data[..esc.intermediates.len()]);
+                buf[esc.intermediates.len() + 1] = esc.final_byte;
             }
-            Csi {
-                private,
-                params,
-                intermediates,
-                final_byte,
-            } => {
+            Csi(csi) => {
                 buf[0] = ESC;
                 buf[1] = CSI;
                 buf = &mut buf[2..];
-                if let Some(p) = private {
-                    buf[0] = *p;
+                if let Some(p) = csi.private {
+                    buf[0] = p;
                     buf = &mut buf[1..];
                 }
-                let mut params = params.into_iter();
+                let mut params = csi.params.into_iter();
                 if let Some(param) = params.next() {
                     buf[..param.len()].copy_from_slice(param);
                     buf = &mut buf[param.len()..];
@@ -475,24 +432,19 @@ impl<'a> VTEvent<'a> {
                         buf = &mut buf[param.len()..];
                     }
                 }
-                buf[..intermediates.len()]
-                    .copy_from_slice(&intermediates.data[..intermediates.len()]);
-                buf[intermediates.len()] = *final_byte;
+                buf[..csi.intermediates.len()]
+                    .copy_from_slice(&csi.intermediates.data[..csi.intermediates.len()]);
+                buf[csi.intermediates.len()] = csi.final_byte;
             }
-            DcsStart {
-                private,
-                params,
-                intermediates,
-                final_byte,
-            } => {
+            DcsStart(dcs_start) => {
                 buf[0] = ESC;
                 buf[1] = DCS;
                 buf = &mut buf[2..];
-                if let Some(p) = private {
-                    buf[0] = *p;
+                if let Some(p) = dcs_start.private {
+                    buf[0] = p;
                     buf = &mut buf[1..];
                 }
-                let mut params = params.into_iter();
+                let mut params = dcs_start.params.into_iter();
                 if let Some(param) = params.next() {
                     buf[..param.len()].copy_from_slice(param);
                     buf = &mut buf[param.len()..];
@@ -503,9 +455,10 @@ impl<'a> VTEvent<'a> {
                         buf = &mut buf[param.len()..];
                     }
                 }
-                buf[..intermediates.len()]
-                    .copy_from_slice(&intermediates.data[..intermediates.len()]);
-                buf[intermediates.len()] = *final_byte;
+                buf[..dcs_start.intermediates.len()].copy_from_slice(
+                    &dcs_start.intermediates.data[..dcs_start.intermediates.len()],
+                );
+                buf[dcs_start.intermediates.len()] = dcs_start.final_byte;
             }
             DcsEnd(data) => {
                 buf[..data.len()].copy_from_slice(data);
@@ -537,37 +490,21 @@ impl<'a> VTEvent<'a> {
         match self {
             Raw(s) => VTOwnedEvent::Raw(s.to_vec()),
             C0(b) => VTOwnedEvent::C0(*b),
-            Esc {
-                intermediates,
-                final_byte,
-            } => VTOwnedEvent::Esc {
-                intermediates: intermediates.clone(),
-                final_byte: *final_byte,
-            },
-            Ss2 { char } => VTOwnedEvent::Ss2 { char: *char },
-            Ss3 { char } => VTOwnedEvent::Ss3 { char: *char },
-            Csi {
-                private,
-                params,
-                intermediates,
-                final_byte,
-            } => VTOwnedEvent::Csi {
-                private: private.clone(),
-                params: params.to_owned(),
-                intermediates: intermediates.clone(),
-                final_byte: *final_byte,
-            },
-            DcsStart {
-                private,
-                params,
-                intermediates,
-                final_byte,
-            } => VTOwnedEvent::DcsStart {
-                private: private.clone(),
-                params: params.to_owned(),
-                intermediates: intermediates.clone(),
-                final_byte: *final_byte,
-            },
+            Esc(esc) => VTOwnedEvent::Esc(*esc),
+            Ss2(ss2) => VTOwnedEvent::Ss2(*ss2),
+            Ss3(ss3) => VTOwnedEvent::Ss3(*ss3),
+            Csi(csi) => VTOwnedEvent::Csi(CSIOwned {
+                private: csi.private,
+                params: csi.params.to_owned(),
+                intermediates: csi.intermediates.clone(),
+                final_byte: csi.final_byte,
+            }),
+            DcsStart(dcs_start) => VTOwnedEvent::DcsStart(DCSOwned {
+                private: dcs_start.private,
+                params: dcs_start.params.to_owned(),
+                intermediates: dcs_start.intermediates.clone(),
+                final_byte: dcs_start.final_byte,
+            }),
             DcsData(s) => VTOwnedEvent::DcsData(s.to_vec()),
             DcsEnd(s) => VTOwnedEvent::DcsEnd(s.to_vec()),
             DcsCancel => VTOwnedEvent::DcsCancel,
@@ -583,7 +520,7 @@ impl<'a> VTEvent<'a> {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ParamBufOwned {
     pub(crate) params: Params,
 }
@@ -637,37 +574,17 @@ impl ParamBufOwned {
 pub enum VTOwnedEvent {
     Raw(Vec<u8>),
     C0(u8),
-    Esc {
-        intermediates: VTIntermediate,
-        final_byte: u8,
-    },
-    Ss2 {
-        char: u8,
-    },
-    Ss3 {
-        char: u8,
-    },
-    Csi {
-        private: Option<u8>,
-        params: ParamBufOwned,
-        intermediates: VTIntermediate,
-        final_byte: u8,
-    },
-    DcsStart {
-        private: Option<u8>,
-        params: ParamBufOwned,
-        intermediates: VTIntermediate,
-        final_byte: u8,
-    },
+    Esc(Esc),
+    Ss2(SS2),
+    Ss3(SS3),
+    Csi(CSIOwned),
+    DcsStart(DCSOwned),
     DcsData(Vec<u8>),
     DcsEnd(Vec<u8>),
     DcsCancel,
     OscStart,
     OscData(Vec<u8>),
-    OscEnd {
-        data: Vec<u8>,
-        used_bel: bool,
-    },
+    OscEnd { data: Vec<u8>, used_bel: bool },
     OscCancel,
 }
 
@@ -682,37 +599,24 @@ impl VTOwnedEvent {
         match self {
             VTOwnedEvent::Raw(s) => VTEvent::Raw(s),
             VTOwnedEvent::C0(b) => VTEvent::C0(*b),
-            VTOwnedEvent::Esc {
-                intermediates,
-                final_byte,
-            } => VTEvent::Esc {
-                intermediates: intermediates.clone(),
-                final_byte: *final_byte,
-            },
-            VTOwnedEvent::Ss2 { char } => VTEvent::Ss2 { char: *char },
-            VTOwnedEvent::Ss3 { char } => VTEvent::Ss3 { char: *char },
-            VTOwnedEvent::Csi {
-                private,
-                params,
-                intermediates,
-                final_byte,
-            } => VTEvent::Csi {
-                private: private.clone(),
-                params: params.borrow(),
-                intermediates: intermediates.clone(),
-                final_byte: *final_byte,
-            },
-            VTOwnedEvent::DcsStart {
-                private,
-                params,
-                intermediates,
-                final_byte,
-            } => VTEvent::DcsStart {
-                private: private.clone(),
-                params: params.borrow(),
-                intermediates: intermediates.clone(),
-                final_byte: *final_byte,
-            },
+            VTOwnedEvent::Esc(esc) => VTEvent::Esc(Esc {
+                intermediates: esc.intermediates.clone(),
+                final_byte: esc.final_byte,
+            }),
+            VTOwnedEvent::Ss2(ss2) => VTEvent::Ss2(SS2 { char: ss2.char }),
+            VTOwnedEvent::Ss3(ss3) => VTEvent::Ss3(SS3 { char: ss3.char }),
+            VTOwnedEvent::Csi(csi) => VTEvent::Csi(CSI {
+                private: csi.private,
+                params: csi.params.borrow(),
+                intermediates: csi.intermediates,
+                final_byte: csi.final_byte,
+            }),
+            VTOwnedEvent::DcsStart(dcs_start) => VTEvent::DcsStart(DCS {
+                private: dcs_start.private,
+                params: dcs_start.params.borrow(),
+                intermediates: dcs_start.intermediates.clone(),
+                final_byte: dcs_start.final_byte,
+            }),
             VTOwnedEvent::DcsData(s) => VTEvent::DcsData(s),
             VTOwnedEvent::DcsEnd(s) => VTEvent::DcsEnd(s),
             VTOwnedEvent::DcsCancel => VTEvent::DcsCancel,
@@ -727,9 +631,57 @@ impl VTOwnedEvent {
     }
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Esc {
+    pub intermediates: VTIntermediate,
+    pub final_byte: u8,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SS2 {
+    pub char: u8,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SS3 {
+    pub char: u8,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CSI<'a> {
     pub private: Option<u8>,
     pub params: ParamBuf<'a>,
+    pub intermediates: VTIntermediate,
+    pub final_byte: u8,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DCS<'a> {
+    pub private: Option<u8>,
+    pub params: ParamBuf<'a>,
+    pub intermediates: VTIntermediate,
+    pub final_byte: u8,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CSIOwned {
+    pub private: Option<u8>,
+    pub params: ParamBufOwned,
+    pub intermediates: VTIntermediate,
+    pub final_byte: u8,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DCSOwned {
+    pub private: Option<u8>,
+    pub params: ParamBufOwned,
     pub intermediates: VTIntermediate,
     pub final_byte: u8,
 }

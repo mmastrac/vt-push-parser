@@ -6,7 +6,7 @@ pub mod signature;
 use smallvec::SmallVec;
 
 use ascii::AsciiControl;
-use event::{VTEvent, VTIntermediate};
+use event::{CSI, DCS, Esc, SS2, SS3, VTEvent, VTIntermediate};
 
 const ESC: u8 = AsciiControl::Esc as _;
 const BEL: u8 = AsciiControl::Bel as _;
@@ -551,28 +551,28 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         borrowed.extend(self.params.iter().map(|v| v.as_slice()));
 
         let privp = self.priv_prefix.take();
-        VTAction::Event(VTEvent::Csi {
+        VTAction::Event(VTEvent::Csi(CSI {
             private: privp,
             params: ParamBuf {
                 params: &self.params,
             },
             intermediates: self.ints,
             final_byte,
-        })
+        }))
     }
 
     fn dcs_start(&mut self, final_byte: u8) -> VTAction {
         self.finish_params_if_any();
 
         let privp = self.priv_prefix.take();
-        VTAction::Event(VTEvent::DcsStart {
+        VTAction::Event(VTEvent::DcsStart(DCS {
             private: privp,
             params: ParamBuf {
                 params: &self.params,
             },
             intermediates: self.ints,
             final_byte,
-        })
+        }))
     }
 
     // =====================
@@ -643,10 +643,10 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
             }
             c if is_final(c) || is_digit(c) => {
                 self.st = Ground;
-                VTAction::Event(VTEvent::Esc {
+                VTAction::Event(VTEvent::Esc(Esc {
                     intermediates: self.ints,
                     final_byte: c,
-                })
+                }))
             }
             ESC => {
                 // ESC ESC allowed, but we stay in the current state
@@ -675,10 +675,10 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
             }
             c if is_final(c) || is_digit(c) => {
                 self.st = Ground;
-                VTAction::Event(VTEvent::Esc {
+                VTAction::Event(VTEvent::Esc(Esc {
                     intermediates: self.ints,
                     final_byte: c,
-                })
+                }))
             }
             _ => {
                 self.st = Ground;
@@ -692,7 +692,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         self.st = Ground;
         match b {
             CAN | SUB => VTAction::None,
-            c => VTAction::Event(VTEvent::Ss2 { char: c }),
+            c => VTAction::Event(VTEvent::Ss2(SS2 { char: c })),
         }
     }
 
@@ -701,7 +701,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         self.st = Ground;
         match b {
             CAN | SUB => VTAction::None,
-            c => VTAction::Event(VTEvent::Ss3 { char: c }),
+            c => VTAction::Event(VTEvent::Ss3(SS3 { char: c })),
         }
     }
 
