@@ -146,6 +146,8 @@ pub fn decode_string(input: &str) -> Vec<u8> {
                 "GS" => result.push(29),
                 "RS" => result.push(30),
                 "US" => result.push(31),
+                // Note that this is only for parsing
+                "SP" => result.push(32),
                 "DEL" => result.push(127),
                 _ => {
                     // If not a recognized control code, treat as literal text

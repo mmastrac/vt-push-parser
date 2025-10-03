@@ -229,11 +229,32 @@ impl<'a> std::fmt::Debug for VTEvent<'a> {
                 final_byte,
             } => {
                 write!(f, "Esc({:?}", intermediates)?;
-                write!(f, ", {})", *final_byte as char)?;
+                write!(f, ", ")?;
+                if let Ok(c) = AsciiControl::try_from(*final_byte as char) {
+                    write!(f, "{})", c)?;
+                } else {
+                    write!(f, "{})", *final_byte as char)?;
+                }
                 Ok(())
             }
-            Ss2 { char } => write!(f, "Ss2({:?})", *char as char),
-            Ss3 { char } => write!(f, "Ss3({:?})", *char as char),
+            Ss2 { char } => {
+                write!(f, "Ss2(")?;
+                if let Ok(c) = AsciiControl::try_from(*char as char) {
+                    write!(f, "{})", c)?;
+                } else {
+                    write!(f, "{:?})", *char as char)?;
+                }
+                Ok(())
+            }
+            Ss3 { char } => {
+                write!(f, "Ss3(")?;
+                if let Ok(c) = AsciiControl::try_from(*char as char) {
+                    write!(f, "{})", c)?;
+                } else {
+                    write!(f, "{:?})", *char as char)?;
+                }
+                Ok(())
+            }
             Csi {
                 private,
                 params,
