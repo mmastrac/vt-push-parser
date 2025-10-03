@@ -151,9 +151,6 @@ pub fn run_tests<const INTEREST: u8>(
     config: TestConfig,
     extra_validation: &(impl Fn(&str, &str, &[u8]) + std::panic::UnwindSafe + std::panic::RefUnwindSafe),
 ) {
-    println!();
-    eprintln!("Testing {}", config.input_file);
-
     let mut output = String::new();
     let mut failures = 0;
     output.push_str(&format!("# {}\n", config.title));
