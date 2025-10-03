@@ -193,6 +193,15 @@ Esc(' ', M)
 Ss3('A')
 ```
 ---
+## SS2: Single shift 2 with final A
+```
+<ESC>NA
+```
+
+```
+Ss2('A')
+```
+---
 ## DCS: CSI payload
 ```
 <ESC>Pq<ESC>[38:2:12:34:56m<ESC>\
@@ -513,5 +522,14 @@ DcsStart(, '1', '2', '3', '', |), data=<ESC><ESC>data
 
 ```
 DcsStart(, '1', '2', '3', '', |), data=<ESC><ESC>data
+```
+---
+## ESC: Escape sequence with final c (RIS - Reset to Initial State)
+```
+<ESC>c
+```
+
+```
+Esc('', c)
 ```
 ---

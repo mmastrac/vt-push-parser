@@ -43,6 +43,8 @@ Hello<DEL>World
 <ESC> M
 # SS3: Single shift 3 with final A (arrow key)
 <ESC>OA
+# SS2: Single shift 2 with final A
+<ESC>NA
 
 # DCS: CSI payload
 <ESC>Pq<ESC>[38:2:12:34:56m<ESC>\
@@ -122,3 +124,6 @@ Hello<ESC>P:1;2;3|data<ESC>\World
 <ESC>P1;2;3|<DEL><ESC><ESC>data<ESC>\
 # DCS: DEL ignored inside after double escape
 <ESC>P1;2;3|<ESC><ESC><DEL>data<ESC>\
+
+# ESC: Escape sequence with final c (RIS - Reset to Initial State)
+<ESC>c
