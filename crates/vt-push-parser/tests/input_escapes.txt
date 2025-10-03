@@ -1,0 +1,68 @@
+# ESC space (Alt+space)
+<ESC><SP>
+
+# ESC ! (Alt+!)
+<ESC>!
+
+# ESC ( (Alt+()
+<ESC>(
+
+# ESC / (Alt+/, last intermediate character)
+<ESC>/
+
+# ESC ? (Alt+?)
+<ESC>?
+
+# ESC > (Alt+>)
+<ESC>>
+
+# ESC 1 (Alt+1)
+<ESC>1
+
+# ESC M (Alt+M)
+<ESC>M
+
+# ESC N (Alt+N, NOT SS2 in input mode)
+<ESC>N
+
+# ESC a (Alt+a)
+<ESC>a
+
+# Alt+Enter (ESC \r)
+<ESC><CR>
+
+# Alt+Tab (ESC \t)
+<ESC><TAB>
+
+# Alt+Newline (ESC \n)
+<ESC><LF>
+
+# ESC [ A (Up arrow - CSI sequence)
+<ESC>[A
+
+# ESC O P (F1 - SS3 sequence)
+<ESC>OP
+
+# ESC ESC (Alt+ESC)
+<ESC><ESC>
+
+# ESC ESC [A (Alt+ESC followed by raw text [A)
+<ESC><ESC>[A
+
+# ESC CAN (Alt+Ctrl+x)
+<ESC><CAN>
+
+# ESC SUB (Alt+Ctrl+z)
+<ESC><SUB>
+
+# ESC DEL (Alt+Backspace)
+<ESC><DEL>
+
+# Multiple Alt+key sequences in a row
+<ESC>a<ESC>b<ESC>c
+
+# Alt+key mixed with regular text
+hello<ESC>aworld
+
+# ESC followed by various C0 controls
+<ESC><NUL><ESC><SOH><ESC><STX>
