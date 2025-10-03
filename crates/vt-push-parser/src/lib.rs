@@ -31,8 +31,12 @@ pub enum VTAction<'a> {
     /// currently buffered, emit the buffered bytes.
     None,
     /// The parser emitted an event. If currently buffered, emit the buffered
-    /// bytes.
+    /// bytes before emitting the specified event.
     Event(VTEvent<'a>),
+    /// The parser emitted an event. If currently buffered, emit the buffered
+    /// bytes before emiting the specified event.  Also, buffer the current
+    /// byte.
+    EventAndBuffer((VTEvent<'a>, VTEmit)),
     /// The parser ended a region.
     End(VTEnd),
     /// Start or continue buffering bytes. Include the current byte in the
@@ -53,6 +57,8 @@ pub enum VTEmit {
     Dcs,
     /// Emit this byte into the current OSC stream.
     Osc,
+    /// Emit this byte into the current PasteContent stream
+    PasteContent,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -129,6 +135,8 @@ enum State {
     OscEsc,
     SosPmApcString,
     SpaEsc,
+    PasteContent,
+    PossiblePasteEnd,
 }
 
 pub const VT_PARSER_INTEREST_NONE: u8 = 0;
@@ -138,12 +146,22 @@ pub const VT_PARSER_INTEREST_CSI: u8 = 1 << 0;
 pub const VT_PARSER_INTEREST_DCS: u8 = 1 << 1;
 /// Request OSC events from parser.
 pub const VT_PARSER_INTEREST_OSC: u8 = 1 << 2;
-/// Request other events from parser.
-pub const VT_PARSER_INTEREST_OTHER: u8 = 1 << 3;
-pub const VT_PARSER_INTEREST_ALL: u8 = VT_PARSER_INTEREST_CSI
+/// Request Esc N events from parser.
+pub const VT_PARSER_INTEREST_ESC_INPUT: u8 = 1 << 3;
+/// Enable bracketed paste mode in parser (xterm extension).
+pub const VT_PARSER_INTEREST_BRACKETED_PASTE: u8 = 1 << 4;
+
+/// Request input-specific terminal events from parser.
+pub const VT_PARSER_INTEREST_INPUT: u8 = VT_PARSER_INTEREST_CSI
     | VT_PARSER_INTEREST_DCS
     | VT_PARSER_INTEREST_OSC
-    | VT_PARSER_INTEREST_OTHER;
+    | VT_PARSER_INTEREST_ESC_INPUT
+    | VT_PARSER_INTEREST_BRACKETED_PASTE;
+
+pub const VT_PARSER_INTEREST_OUTPUT: u8 =
+    VT_PARSER_INTEREST_CSI | VT_PARSER_INTEREST_DCS | VT_PARSER_INTEREST_OSC;
+
+const PASTE_END_MARKER: &[u8] = b"\x1b[201~";
 
 #[must_use]
 trait MaybeAbortable {
@@ -164,7 +182,7 @@ impl MaybeAbortable for () {
     }
 }
 
-pub struct VTPushParser<const INTEREST: u8 = VT_PARSER_INTEREST_ALL> {
+pub struct VTPushParser<const INTEREST: u8 = VT_PARSER_INTEREST_OUTPUT> {
     st: State,
 
     // Header collectors for short escapes (we borrow from these in callbacks)
@@ -173,6 +191,8 @@ pub struct VTPushParser<const INTEREST: u8 = VT_PARSER_INTEREST_ALL> {
     cur_param: Param,
     priv_prefix: Option<u8>,
     held_byte: Option<u8>,
+    // Length of matched bracketed paste end marker when in PossiblePasteEnd state
+    paste_end_matched: usize,
 }
 
 impl VTPushParser {
@@ -192,6 +212,12 @@ impl VTPushParser {
     }
 }
 
+impl Default for VTPushParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<const INTEREST: u8> VTPushParser<INTEREST> {
     const fn new_with() -> Self {
         Self {
@@ -201,6 +227,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
             cur_param: SmallVec::new_const(),
             priv_prefix: None,
             held_byte: None,
+            paste_end_matched: 0,
         }
     }
 
@@ -287,6 +314,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                                 data: &input[range],
                                 used_bel: $used_bel,
                             }),
+                            VTEmit::PasteContent => $cb(VTEvent::PasteContent(&input[range])),
                         }
                         .abort()
                         {
@@ -297,6 +325,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                             VTEmit::Ground => $cb(VTEvent::Raw(&input[range])),
                             VTEmit::Dcs => $cb(VTEvent::DcsData(&input[range])),
                             VTEmit::Osc => $cb(VTEvent::OscData(&input[range])),
+                            VTEmit::PasteContent => $cb(VTEvent::PasteContent(&input[range])),
                         }
                         .abort()
                         {
@@ -339,6 +368,41 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                 }
             }
 
+            // Fast path for bracketed paste content
+            if self.st == State::PasteContent {
+                let start = i;
+                loop {
+                    if i >= input.len() {
+                        cb(VTEvent::PasteContent(&input[start..]));
+                        return input.len();
+                    }
+
+                    if input[i] == ESC {
+                        // Check if this might be ESC[201~ (paste end marker)
+                        let buf = &input[i..input.len().min(i + PASTE_END_MARKER.len())];
+                        if PASTE_END_MARKER.starts_with(buf) {
+                            if start < i {
+                                cb(VTEvent::PasteContent(&input[start..i]));
+                            }
+                            if buf.len() == PASTE_END_MARKER.len() {
+                                // Complete end marker match
+                                cb(VTEvent::PasteEnd);
+                                self.st = State::Ground;
+                            } else {
+                                // Partial end marker match
+                                // delegate to the state machine
+                                self.st = State::PossiblePasteEnd;
+                                self.paste_end_matched = buf.len();
+                            }
+                            i += buf.len();
+                            break;
+                        }
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+
             // Fast path: search for the CSI final
             if self.st == State::CsiIgnore {
                 loop {
@@ -372,6 +436,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                                 VTEmit::Ground => cb(VTEvent::Raw(&input[range])),
                                 VTEmit::Dcs => cb(VTEvent::DcsData(&input[range])),
                                 VTEmit::Osc => cb(VTEvent::OscData(&input[range])),
+                                VTEmit::PasteContent => unreachable!(),
                             }
                             .abort()
                             {
@@ -388,9 +453,19 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                     }
                 }
                 VTAction::Event(e) => {
+                    emit!(state, i, cb, false, false);
                     if cb(e).abort() {
                         return i + 1;
                     }
+                }
+                VTAction::EventAndBuffer((e, emit)) => {
+                    emit!(state, i, cb, false, false);
+                    if cb(e).abort() {
+                        return i + 1;
+                    }
+                    held_byte = None;
+                    state.buffer_idx = i;
+                    state.current_emit = Some(emit);
                 }
                 VTAction::End(VTEnd::Dcs) => {
                     held_byte = None;
@@ -407,6 +482,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                                 VTEmit::Ground => cb(VTEvent::Raw(&[h])),
                                 VTEmit::Dcs => cb(VTEvent::DcsData(&[h])),
                                 VTEmit::Osc => cb(VTEvent::OscData(&[h])),
+                                VTEmit::PasteContent => cb(VTEvent::PasteContent(&[h])),
                             }
                             .abort()
                             {
@@ -434,6 +510,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                         VTEmit::Ground => unreachable!(),
                         VTEmit::Dcs => cb(VTEvent::DcsCancel),
                         VTEmit::Osc => cb(VTEvent::OscCancel),
+                        VTEmit::PasteContent => unreachable!(),
                     }
                     .abort()
                     {
@@ -456,6 +533,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                     VTEmit::Ground => cb(VTEvent::Raw(range)),
                     VTEmit::Dcs => cb(VTEvent::DcsData(range)),
                     VTEmit::Osc => cb(VTEvent::OscData(range)),
+                    VTEmit::PasteContent => cb(VTEvent::PasteContent(range)),
                 };
             }
         };
@@ -481,11 +559,17 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
-    fn push_with(&mut self, b: u8) -> VTAction {
+    fn push_with(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         match self.st {
             Ground => self.on_ground(b),
-            Escape => self.on_escape(b),
+            Escape => {
+                if INTEREST & VT_PARSER_INTEREST_ESC_INPUT != 0 {
+                    self.on_escape_input(b)
+                } else {
+                    self.on_escape(b)
+                }
+            }
             EscInt => self.on_esc_int(b),
             EscSs2 => self.on_esc_ss2(b),
             EscSs3 => self.on_esc_ss3(b),
@@ -508,10 +592,14 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
 
             SosPmApcString => self.on_spa_string(b),
             SpaEsc => self.on_spa_esc(b),
+
+            // PasteContent is handled entirely in the fast path above
+            PasteContent => unreachable!(),
+            PossiblePasteEnd => self.on_possible_paste_end(b),
         }
     }
 
-    pub fn finish<F: FnMut(VTEvent)>(&mut self, cb: &mut F) {
+    pub fn finish<F: FnMut(VTEvent)>(&mut self, _cb: &mut F) {
         self.reset_collectors();
         self.st = State::Ground;
 
@@ -543,8 +631,26 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
-    fn emit_csi(&mut self, final_byte: u8) -> VTAction {
+    fn emit_csi(&mut self, final_byte: u8) -> VTAction<'_> {
         self.finish_params_if_any();
+
+        // Check for bracketed paste start/end sequences
+        if (INTEREST & VT_PARSER_INTEREST_BRACKETED_PASTE != 0)
+            && final_byte == b'~'
+            && self.priv_prefix.is_none()
+            && self.ints.is_empty()
+            && self.params.len() == 1
+        {
+            if self.params[0].as_slice() == b"200" {
+                // CSI 200~ - Start bracketed paste
+                self.st = State::PasteContent;
+                return VTAction::Event(VTEvent::PasteStart);
+            } else if self.params[0].as_slice() == b"201" {
+                // CSI 201~ - End bracketed paste
+                self.st = State::Ground;
+                return VTAction::Event(VTEvent::PasteEnd);
+            }
+        }
 
         // Build borrowed views into self.params
         let mut borrowed: SmallVec<[&[u8]; 4]> = SmallVec::new();
@@ -561,7 +667,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         })
     }
 
-    fn dcs_start(&mut self, final_byte: u8) -> VTAction {
+    fn dcs_start(&mut self, final_byte: u8) -> VTAction<'_> {
         self.finish_params_if_any();
 
         let privp = self.priv_prefix.take();
@@ -579,7 +685,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
     // State handlers
     // =====================
 
-    fn on_ground(&mut self, b: u8) -> VTAction {
+    fn on_ground(&mut self, b: u8) -> VTAction<'_> {
         match b {
             ESC => {
                 self.clear_hdr_collectors();
@@ -593,7 +699,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
-    fn on_escape(&mut self, b: u8) -> VTAction {
+    fn on_escape(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         match b {
             CAN | SUB => {
@@ -652,14 +758,66 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                 // ESC ESC allowed, but we stay in the current state
                 VTAction::Event(VTEvent::C0(ESC))
             }
-            _ => {
+            c => {
+                // Invalid or 8-bit bytes (0x80-0xFF) - emit as Esc for
+                // debuggability
                 self.st = Ground;
-                VTAction::None
+                VTAction::Event(VTEvent::Esc {
+                    intermediates: self.ints,
+                    final_byte: c,
+                })
             }
         }
     }
 
-    fn on_esc_int(&mut self, b: u8) -> VTAction {
+    fn on_escape_input(&mut self, b: u8) -> VTAction<'_> {
+        use State::*;
+        match b {
+            // In input mode, CAN and SUB can be Alt+Ctrl+x and Alt+Ctrl+z
+            // They don't cancel escape sequences in keyboard input
+            // DEL (0x7F) in input mode can be Alt+Backspace
+            // (handled by default case below)
+            // Note: Intermediates (0x20-0x2F) are NOT treated specially in
+            // input mode - they're just Alt+key combinations (e.g., Alt+space,
+            // Alt+!, etc.). The intermediate handling is for output mode only.
+            CSI => {
+                if INTEREST & VT_PARSER_INTEREST_CSI == 0 {
+                    self.st = CsiIgnore;
+                } else {
+                    self.st = CsiEntry;
+                }
+                VTAction::None
+            }
+            // SS3 is used for function keys in application mode (ESC O P =
+            // F1, etc.) and arrow keys (ESC O A = Up in app mode)
+            SS3 => {
+                self.st = EscSs3;
+                VTAction::None
+            }
+            // OSC used for terminal responses (e.g., clipboard queries)
+            OSC if INTEREST & VT_PARSER_INTEREST_OSC != 0 => {
+                self.st = OscString;
+                VTAction::Event(VTEvent::OscStart)
+            }
+            // DCS used for terminal responses (e.g., DECRQSS)
+            DCS if INTEREST & VT_PARSER_INTEREST_DCS != 0 => {
+                self.st = DcsEntry;
+                VTAction::None
+            }
+            // Treat everything else as regular Esc sequences
+            // as those likely represent various Alt/Ctrl combination
+            // key inputs
+            c => {
+                self.st = Ground;
+                VTAction::Event(VTEvent::Esc {
+                    intermediates: self.ints,
+                    final_byte: c,
+                })
+            }
+        }
+    }
+
+    fn on_esc_int(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         match b {
             CAN | SUB => {
@@ -687,7 +845,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
-    fn on_esc_ss2(&mut self, b: u8) -> VTAction {
+    fn on_esc_ss2(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         self.st = Ground;
         match b {
@@ -696,7 +854,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
-    fn on_esc_ss3(&mut self, b: u8) -> VTAction {
+    fn on_esc_ss3(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         self.st = Ground;
         match b {
@@ -706,7 +864,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
     }
 
     // ---- CSI
-    fn on_csi_entry(&mut self, b: u8) -> VTAction {
+    fn on_csi_entry(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         match b {
             CAN | SUB => {
@@ -757,7 +915,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
-    fn on_csi_param(&mut self, b: u8) -> VTAction {
+    fn on_csi_param(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         match b {
             CAN | SUB => {
@@ -800,7 +958,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
-    fn on_csi_int(&mut self, b: u8) -> VTAction {
+    fn on_csi_int(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         match b {
             CAN | SUB => {
@@ -831,7 +989,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
-    fn on_csi_ignore(&mut self, b: u8) -> VTAction {
+    fn on_csi_ignore(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         match b {
             CAN | SUB => {
@@ -852,7 +1010,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
     }
 
     // ---- DCS
-    fn on_dcs_entry(&mut self, b: u8) -> VTAction {
+    fn on_dcs_entry(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         match b {
             CAN | SUB => {
@@ -902,7 +1060,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
-    fn on_dcs_param(&mut self, b: u8) -> VTAction {
+    fn on_dcs_param(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         match b {
             CAN | SUB => {
@@ -946,7 +1104,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
-    fn on_dcs_int(&mut self, b: u8) -> VTAction {
+    fn on_dcs_int(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         match b {
             CAN | SUB => {
@@ -977,7 +1135,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
-    fn on_dcs_ignore(&mut self, b: u8) -> VTAction {
+    fn on_dcs_ignore(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         match b {
             CAN | SUB => {
@@ -993,7 +1151,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
-    fn on_dcs_ignore_esc(&mut self, b: u8) -> VTAction {
+    fn on_dcs_ignore_esc(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         match b {
             CAN | SUB => {
@@ -1013,7 +1171,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
-    fn on_dcs_pass(&mut self, b: u8) -> VTAction {
+    fn on_dcs_pass(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         match b {
             CAN | SUB => {
@@ -1029,7 +1187,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
-    fn on_dcs_esc(&mut self, b: u8) -> VTAction {
+    fn on_dcs_esc(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         match b {
             ST_FINAL => {
@@ -1050,7 +1208,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
     }
 
     // ---- OSC
-    fn on_osc_string(&mut self, b: u8) -> VTAction {
+    fn on_osc_string(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         match b {
             CAN | SUB => {
@@ -1071,7 +1229,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
-    fn on_osc_esc(&mut self, b: u8) -> VTAction {
+    fn on_osc_esc(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         match b {
             ST_FINAL => {
@@ -1088,7 +1246,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
     }
 
     // ---- SOS/PM/APC (ignored payload)
-    fn on_spa_string(&mut self, b: u8) -> VTAction {
+    fn on_spa_string(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         match b {
             CAN | SUB => {
@@ -1104,7 +1262,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
-    fn on_spa_esc(&mut self, b: u8) -> VTAction {
+    fn on_spa_esc(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         match b {
             ST_FINAL => {
@@ -1120,6 +1278,30 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                 self.st = State::SosPmApcString;
                 VTAction::None
             }
+        }
+    }
+
+    fn on_possible_paste_end(&mut self, b: u8) -> VTAction<'_> {
+        use State::*;
+
+        if b == PASTE_END_MARKER[self.paste_end_matched] {
+            self.paste_end_matched += 1;
+            if self.paste_end_matched == PASTE_END_MARKER.len() {
+                // Got complete paste end marker match
+                self.st = Ground;
+                self.paste_end_matched = 0;
+                VTAction::Event(VTEvent::PasteEnd)
+            } else {
+                // Still matching
+                VTAction::None
+            }
+        } else {
+            // This is NOT a bracketed paste end marker, emit matched
+            // prefix and the current byte as PasteContent.
+            let content = &PASTE_END_MARKER[..self.paste_end_matched];
+            self.st = PasteContent;
+            self.paste_end_matched = 0;
+            VTAction::EventAndBuffer((VTEvent::PasteContent(content), VTEmit::PasteContent))
         }
     }
 }
@@ -1431,5 +1613,121 @@ mod tests {
         assert_eq!(ev[0], "Raw('abc')");
         assert_eq!(ev[1], "C0(18)");
         assert_eq!(ev[2], "Raw('def')");
+    }
+
+    #[test]
+    fn paste_end_marker_split() {
+        // Test that ESC[201~ is properly detected even when split across buffers
+        let mut parser = VTPushParser::new_with_interest::<VT_PARSER_INTEREST_INPUT>();
+        let mut events = Vec::new();
+
+        // Start paste
+        parser.feed_with(b"\x1b[200~", &mut |ev| events.push(format!("{:?}", ev)));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0], "PasteStart");
+        events.clear();
+
+        // Paste content followed by partial end marker
+        parser.feed_with(b"hello\x1b", &mut |ev| events.push(format!("{:?}", ev)));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0], "PasteContent('hello')");
+        events.clear();
+
+        // Complete the end marker
+        parser.feed_with(b"[201~", &mut |ev| events.push(format!("{:?}", ev)));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0], "PasteEnd");
+    }
+
+    #[test]
+    fn paste_end_marker_split_multiple_chunks() {
+        // Test ESC[201~ split byte-by-byte
+        let mut parser = VTPushParser::new_with_interest::<VT_PARSER_INTEREST_INPUT>();
+        let mut events = Vec::new();
+
+        parser.feed_with(b"\x1b[200~", &mut |ev| events.push(format!("{:?}", ev)));
+        events.clear();
+
+        parser.feed_with(b"test", &mut |ev| events.push(format!("{:?}", ev)));
+        assert_eq!(events.len(), 1);
+        assert!(events[0].contains("PasteContent"));
+        events.clear();
+
+        // Split the end marker across multiple calls
+        parser.feed_with(b"\x1b", &mut |ev| events.push(format!("{:?}", ev)));
+        assert_eq!(events.len(), 0);
+
+        parser.feed_with(b"[", &mut |ev| events.push(format!("{:?}", ev)));
+        assert_eq!(events.len(), 0);
+
+        parser.feed_with(b"2", &mut |ev| events.push(format!("{:?}", ev)));
+        assert_eq!(events.len(), 0);
+
+        parser.feed_with(b"0", &mut |ev| events.push(format!("{:?}", ev)));
+        assert_eq!(events.len(), 0);
+
+        parser.feed_with(b"1", &mut |ev| events.push(format!("{:?}", ev)));
+        assert_eq!(events.len(), 0);
+
+        parser.feed_with(b"~", &mut |ev| events.push(format!("{:?}", ev)));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0], "PasteEnd");
+    }
+
+    #[test]
+    fn paste_false_end_marker() {
+        // Test that ESC in paste content that's not followed by [201~ is treated as content
+        let mut parser = VTPushParser::new_with_interest::<VT_PARSER_INTEREST_INPUT>();
+        let mut events = Vec::new();
+
+        parser.feed_with(b"\x1b[200~", &mut |ev| events.push(format!("{:?}", ev)));
+        events.clear();
+
+        // ESC followed by a non-marker
+        parser.feed_with(b"hello\x1b[2H", &mut |ev| events.push(format!("{:?}", ev)));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0], "PasteContent('hello<ESC>[2H')");
+        events.clear();
+
+        // ESC followed by a non-end marker split across feeds
+        parser.feed_with(b"hello\x1b", &mut |ev| events.push(format!("{:?}", ev)));
+        parser.feed_with(b"[2H", &mut |ev| events.push(format!("{:?}", ev)));
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0], "PasteContent('hello')");
+        assert_eq!(events[1], "PasteContent('<ESC>[2')");
+        assert_eq!(events[2], "PasteContent('H')");
+        events.clear();
+
+        // ESC followed by a non-end marker split across feeds
+        parser.feed_with(b"hello\x1b", &mut |ev| events.push(format!("{:?}", ev)));
+        parser.feed_with(b"[2", &mut |ev| events.push(format!("{:?}", ev)));
+        parser.feed_with(b"H", &mut |ev| events.push(format!("{:?}", ev)));
+        // Real PasteEnd
+        parser.feed_with(b"\x1b[201~", &mut |ev| events.push(format!("{:?}", ev)));
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[0], "PasteContent('hello')");
+        assert_eq!(events[1], "PasteContent('<ESC>[2')");
+        assert_eq!(events[2], "PasteContent('H')");
+        assert_eq!(events[3], "PasteEnd");
+        events.clear();
+    }
+
+    #[test]
+    fn input_interest_invalid_esc_bytes() {
+        // Test that ESC followed by invalid/8-bit bytes (0x80-0xFF) emits
+        // Esc events for debuggability, rather than silently ignoring them.
+        let mut parser = VTPushParser::new_with_interest::<VT_PARSER_INTEREST_INPUT>();
+        let mut events = Vec::new();
+
+        // ESC 0x80 (C1 control in 8-bit mode, invalid in 7-bit ESC context)
+        parser.feed_with(b"\x1b\x80", &mut |ev| events.push(format!("{:?}", ev)));
+        assert_eq!(events.len(), 1);
+        assert!(events[0].starts_with("Esc('',"));
+        events.clear();
+
+        // ESC 0xFF (completely invalid)
+        parser.feed_with(b"\x1b\xFF", &mut |ev| events.push(format!("{:?}", ev)));
+        assert_eq!(events.len(), 1);
+        assert!(events[0].starts_with("Esc('',"));
     }
 }
