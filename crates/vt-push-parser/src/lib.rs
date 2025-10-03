@@ -138,12 +138,17 @@ pub const VT_PARSER_INTEREST_CSI: u8 = 1 << 0;
 pub const VT_PARSER_INTEREST_DCS: u8 = 1 << 1;
 /// Request OSC events from parser.
 pub const VT_PARSER_INTEREST_OSC: u8 = 1 << 2;
-/// Request other events from parser.
-pub const VT_PARSER_INTEREST_OTHER: u8 = 1 << 3;
-pub const VT_PARSER_INTEREST_ALL: u8 = VT_PARSER_INTEREST_CSI
+/// Request Esc N events from parser.
+pub const VT_PARSER_INTEREST_ESC_INPUT: u8 = 1 << 3;
+
+/// Request input-specific terminal events from parser.
+pub const VT_PARSER_INTEREST_INPUT: u8 = VT_PARSER_INTEREST_CSI
     | VT_PARSER_INTEREST_DCS
     | VT_PARSER_INTEREST_OSC
-    | VT_PARSER_INTEREST_OTHER;
+    | VT_PARSER_INTEREST_ESC_INPUT;
+
+pub const VT_PARSER_INTEREST_OUTPUT: u8 =
+    VT_PARSER_INTEREST_CSI | VT_PARSER_INTEREST_DCS | VT_PARSER_INTEREST_OSC;
 
 #[must_use]
 trait MaybeAbortable {
@@ -164,7 +169,7 @@ impl MaybeAbortable for () {
     }
 }
 
-pub struct VTPushParser<const INTEREST: u8 = VT_PARSER_INTEREST_ALL> {
+pub struct VTPushParser<const INTEREST: u8 = VT_PARSER_INTEREST_OUTPUT> {
     st: State,
 
     // Header collectors for short escapes (we borrow from these in callbacks)
@@ -189,6 +194,12 @@ impl VTPushParser {
 
     pub const fn new_with_interest<const INTEREST: u8>() -> VTPushParser<INTEREST> {
         VTPushParser::new_with()
+    }
+}
+
+impl Default for VTPushParser {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -481,11 +492,17 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
-    fn push_with(&mut self, b: u8) -> VTAction {
+    fn push_with(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         match self.st {
             Ground => self.on_ground(b),
-            Escape => self.on_escape(b),
+            Escape => {
+                if INTEREST & VT_PARSER_INTEREST_ESC_INPUT != 0 {
+                    self.on_escape_input(b)
+                } else {
+                    self.on_escape(b)
+                }
+            }
             EscInt => self.on_esc_int(b),
             EscSs2 => self.on_esc_ss2(b),
             EscSs3 => self.on_esc_ss3(b),
@@ -511,7 +528,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
-    pub fn finish<F: FnMut(VTEvent)>(&mut self, cb: &mut F) {
+    pub fn finish<F: FnMut(VTEvent)>(&mut self, _cb: &mut F) {
         self.reset_collectors();
         self.st = State::Ground;
 
@@ -561,7 +578,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         })
     }
 
-    fn dcs_start(&mut self, final_byte: u8) -> VTAction {
+    fn dcs_start(&mut self, final_byte: u8) -> VTAction<'_> {
         self.finish_params_if_any();
 
         let privp = self.priv_prefix.take();
@@ -579,7 +596,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
     // State handlers
     // =====================
 
-    fn on_ground(&mut self, b: u8) -> VTAction {
+    fn on_ground(&mut self, b: u8) -> VTAction<'_> {
         match b {
             ESC => {
                 self.clear_hdr_collectors();
@@ -593,7 +610,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
-    fn on_escape(&mut self, b: u8) -> VTAction {
+    fn on_escape(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         match b {
             CAN | SUB => {
@@ -652,14 +669,66 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                 // ESC ESC allowed, but we stay in the current state
                 VTAction::Event(VTEvent::C0(ESC))
             }
-            _ => {
+            c => {
+                // Invalid or 8-bit bytes (0x80-0xFF) - emit as Esc for
+                // debuggability
                 self.st = Ground;
-                VTAction::None
+                VTAction::Event(VTEvent::Esc {
+                    intermediates: self.ints,
+                    final_byte: c,
+                })
             }
         }
     }
 
-    fn on_esc_int(&mut self, b: u8) -> VTAction {
+    fn on_escape_input(&mut self, b: u8) -> VTAction<'_> {
+        use State::*;
+        match b {
+            // In input mode, CAN and SUB can be Alt+Ctrl+x and Alt+Ctrl+z
+            // They don't cancel escape sequences in keyboard input
+            // DEL (0x7F) in input mode can be Alt+Backspace
+            // (handled by default case below)
+            // Note: Intermediates (0x20-0x2F) are NOT treated specially in
+            // input mode - they're just Alt+key combinations (e.g., Alt+space,
+            // Alt+!, etc.). The intermediate handling is for output mode only.
+            CSI => {
+                if INTEREST & VT_PARSER_INTEREST_CSI == 0 {
+                    self.st = CsiIgnore;
+                } else {
+                    self.st = CsiEntry;
+                }
+                VTAction::None
+            }
+            // SS3 is used for function keys in application mode (ESC O P =
+            // F1, etc.) and arrow keys (ESC O A = Up in app mode)
+            SS3 => {
+                self.st = EscSs3;
+                VTAction::None
+            }
+            // OSC used for terminal responses (e.g., clipboard queries)
+            OSC if INTEREST & VT_PARSER_INTEREST_OSC != 0 => {
+                self.st = OscString;
+                VTAction::Event(VTEvent::OscStart)
+            }
+            // DCS used for terminal responses (e.g., DECRQSS)
+            DCS if INTEREST & VT_PARSER_INTEREST_DCS != 0 => {
+                self.st = DcsEntry;
+                VTAction::None
+            }
+            // Treat everything else as regular Esc sequences
+            // as those likely represent various Alt/Ctrl combination
+            // key inputs
+            c => {
+                self.st = Ground;
+                VTAction::Event(VTEvent::Esc {
+                    intermediates: self.ints,
+                    final_byte: c,
+                })
+            }
+        }
+    }
+
+    fn on_esc_int(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         match b {
             CAN | SUB => {
@@ -687,7 +756,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
-    fn on_esc_ss2(&mut self, b: u8) -> VTAction {
+    fn on_esc_ss2(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         self.st = Ground;
         match b {
@@ -696,7 +765,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
-    fn on_esc_ss3(&mut self, b: u8) -> VTAction {
+    fn on_esc_ss3(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         self.st = Ground;
         match b {
@@ -706,7 +775,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
     }
 
     // ---- CSI
-    fn on_csi_entry(&mut self, b: u8) -> VTAction {
+    fn on_csi_entry(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         match b {
             CAN | SUB => {
@@ -757,7 +826,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
-    fn on_csi_param(&mut self, b: u8) -> VTAction {
+    fn on_csi_param(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         match b {
             CAN | SUB => {
@@ -800,7 +869,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
-    fn on_csi_int(&mut self, b: u8) -> VTAction {
+    fn on_csi_int(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         match b {
             CAN | SUB => {
@@ -831,7 +900,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
-    fn on_csi_ignore(&mut self, b: u8) -> VTAction {
+    fn on_csi_ignore(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         match b {
             CAN | SUB => {
@@ -852,7 +921,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
     }
 
     // ---- DCS
-    fn on_dcs_entry(&mut self, b: u8) -> VTAction {
+    fn on_dcs_entry(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         match b {
             CAN | SUB => {
@@ -902,7 +971,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
-    fn on_dcs_param(&mut self, b: u8) -> VTAction {
+    fn on_dcs_param(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         match b {
             CAN | SUB => {
@@ -946,7 +1015,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
-    fn on_dcs_int(&mut self, b: u8) -> VTAction {
+    fn on_dcs_int(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         match b {
             CAN | SUB => {
@@ -977,7 +1046,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
-    fn on_dcs_ignore(&mut self, b: u8) -> VTAction {
+    fn on_dcs_ignore(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         match b {
             CAN | SUB => {
@@ -993,7 +1062,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
-    fn on_dcs_ignore_esc(&mut self, b: u8) -> VTAction {
+    fn on_dcs_ignore_esc(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         match b {
             CAN | SUB => {
@@ -1013,7 +1082,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
-    fn on_dcs_pass(&mut self, b: u8) -> VTAction {
+    fn on_dcs_pass(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         match b {
             CAN | SUB => {
@@ -1029,7 +1098,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
-    fn on_dcs_esc(&mut self, b: u8) -> VTAction {
+    fn on_dcs_esc(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         match b {
             ST_FINAL => {
@@ -1050,7 +1119,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
     }
 
     // ---- OSC
-    fn on_osc_string(&mut self, b: u8) -> VTAction {
+    fn on_osc_string(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         match b {
             CAN | SUB => {
@@ -1071,7 +1140,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
-    fn on_osc_esc(&mut self, b: u8) -> VTAction {
+    fn on_osc_esc(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         match b {
             ST_FINAL => {
@@ -1088,7 +1157,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
     }
 
     // ---- SOS/PM/APC (ignored payload)
-    fn on_spa_string(&mut self, b: u8) -> VTAction {
+    fn on_spa_string(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         match b {
             CAN | SUB => {
@@ -1104,7 +1173,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
-    fn on_spa_esc(&mut self, b: u8) -> VTAction {
+    fn on_spa_esc(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
         match b {
             ST_FINAL => {
@@ -1431,5 +1500,24 @@ mod tests {
         assert_eq!(ev[0], "Raw('abc')");
         assert_eq!(ev[1], "C0(18)");
         assert_eq!(ev[2], "Raw('def')");
+    }
+
+    #[test]
+    fn input_interest_invalid_esc_bytes() {
+        // Test that ESC followed by invalid/8-bit bytes (0x80-0xFF) emits
+        // Esc events for debuggability, rather than silently ignoring them.
+        let mut parser = VTPushParser::new_with_interest::<VT_PARSER_INTEREST_INPUT>();
+        let mut events = Vec::new();
+
+        // ESC 0x80 (C1 control in 8-bit mode, invalid in 7-bit ESC context)
+        parser.feed_with(b"\x1b\x80", &mut |ev| events.push(format!("{:?}", ev)));
+        assert_eq!(events.len(), 1);
+        assert!(events[0].starts_with("Esc('',"));
+        events.clear();
+
+        // ESC 0xFF (completely invalid)
+        parser.feed_with(b"\x1b\xFF", &mut |ev| events.push(format!("{:?}", ev)));
+        assert_eq!(events.len(), 1);
+        assert!(events[0].starts_with("Esc('',"));
     }
 }

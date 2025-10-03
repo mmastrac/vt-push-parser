@@ -25,3 +25,8 @@ hxdmp = "0.2.1"
 name = "escapes"
 path = "tests/escapes.rs"
 harness = false
+
+[[test]]
+name = "input_escapes"
+path = "tests/input_escapes.rs"
+harness = false
