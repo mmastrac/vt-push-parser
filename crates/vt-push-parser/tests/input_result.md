@@ -213,3 +213,100 @@ Esc('', <SOH>)
 Esc('', <STX>)
 ```
 ---
+## Bracketed paste mode start
+```
+<ESC>[200~
+```
+
+```
+PasteStart
+```
+---
+## Bracketed paste mode end
+```
+<ESC>[201~
+```
+
+```
+PasteEnd
+```
+---
+## Bracketed paste with simple text
+```
+<ESC>[200~hello world<ESC>[201~
+```
+
+```
+PasteStart
+hello world
+PasteEnd
+```
+---
+## Bracketed paste with newlines
+```
+<ESC>[200~line1<LF>line2<LF>line3<ESC>[201~
+```
+
+```
+PasteStart
+line1<LF>line2<LF>line3
+PasteEnd
+```
+---
+## Bracketed paste with special characters
+```
+<ESC>[200~!@#$%^&*()<ESC>[201~
+```
+
+```
+PasteStart
+!@#$%^&*()
+PasteEnd
+```
+---
+## Bracketed paste with control characters
+```
+<ESC>[200~<TAB>text<CR><LF>more<ESC>[201~
+```
+
+```
+PasteStart
+<TAB>text<CR><LF>more
+PasteEnd
+```
+---
+## Empty bracketed paste
+```
+<ESC>[200~<ESC>[201~
+```
+
+```
+PasteStart
+PasteEnd
+```
+---
+## Bracketed paste with only whitespace
+```
+<ESC>[200~   <TAB>  <LF><ESC>[201~
+```
+
+```
+PasteStart
+   <TAB>  <LF>
+PasteEnd
+```
+---
+## Multiple bracketed pastes in sequence
+```
+<ESC>[200~first<ESC>[201~<ESC>[200~second<ESC>[201~
+```
+
+```
+PasteStart
+first
+PasteEnd
+PasteStart
+second
+PasteEnd
+```
+---

@@ -29,6 +29,16 @@ macro_rules! callback {
                     result.push(VTAccumulator::Esc(format!("{vt_input:?}")))
                 }
 
+                VTEvent::PasteStart | VTEvent::PasteEnd => {
+                    result.push(VTAccumulator::Esc(format!("{vt_input:?}")))
+                }
+                VTEvent::PasteContent(s) => {
+                    if let Some(VTAccumulator::Raw(acc)) = result.last_mut() {
+                        acc.push_str(&encode_string(s));
+                    } else {
+                        result.push(VTAccumulator::Raw(encode_string(s)));
+                    }
+                }
                 VTEvent::DcsStart { .. } => {
                     result.push(VTAccumulator::Dcs(format!("{vt_input:?}, data=")))
                 }

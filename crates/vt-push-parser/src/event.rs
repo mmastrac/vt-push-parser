@@ -200,6 +200,11 @@ pub enum VTEvent<'a> {
         used_bel: bool,
     },
     OscCancel,
+
+    // Bracketed paste stream
+    PasteStart,
+    PasteContent(&'a [u8]),
+    PasteEnd,
 }
 
 impl<'a> std::fmt::Debug for VTEvent<'a> {
@@ -224,6 +229,25 @@ impl<'a> std::fmt::Debug for VTEvent<'a> {
                 Ok(())
             }
             C0(b) => write!(f, "C0({:02x})", b),
+            PasteStart => write!(f, "PasteStart"),
+            PasteContent(s) => {
+                write!(f, "PasteContent('")?;
+                for chunk in s.utf8_chunks() {
+                    for c in chunk.valid().chars() {
+                        if let Ok(c) = AsciiControl::try_from(c) {
+                            write!(f, "{}", c)?;
+                        } else {
+                            write!(f, "{}", c)?;
+                        }
+                    }
+                    if !chunk.invalid().is_empty() {
+                        write!(f, "<{}>", hex::encode(chunk.invalid()))?;
+                    }
+                }
+                write!(f, "')")?;
+                Ok(())
+            }
+            PasteEnd => write!(f, "PasteEnd"),
             Esc {
                 intermediates,
                 final_byte,
@@ -375,6 +399,9 @@ impl<'a> VTEvent<'a> {
         let len = match self {
             Raw(s) => s.len(),
             C0(_) => 1,
+            PasteStart => 6, // ESC [ 2 0 0 ~
+            PasteContent(s) => s.len(),
+            PasteEnd => 6, // ESC [ 2 0 1 ~
             Esc { intermediates, .. } => intermediates.len() + 2,
             Ss2 { .. } => 3,
             Ss3 { .. } => 3,
@@ -431,6 +458,25 @@ impl<'a> VTEvent<'a> {
             }
             C0(b) => {
                 buf[0] = *b;
+            }
+            PasteStart => {
+                buf[0] = ESC;
+                buf[1] = CSI;
+                buf[2] = b'2';
+                buf[3] = b'0';
+                buf[4] = b'0';
+                buf[5] = b'~';
+            }
+            PasteContent(s) => {
+                buf[..s.len()].copy_from_slice(s);
+            }
+            PasteEnd => {
+                buf[0] = ESC;
+                buf[1] = CSI;
+                buf[2] = b'2';
+                buf[3] = b'0';
+                buf[4] = b'1';
+                buf[5] = b'~';
             }
             Ss2 { char } => {
                 buf[0] = ESC;
@@ -537,6 +583,9 @@ impl<'a> VTEvent<'a> {
         match self {
             Raw(s) => VTOwnedEvent::Raw(s.to_vec()),
             C0(b) => VTOwnedEvent::C0(*b),
+            PasteStart => VTOwnedEvent::PasteStart,
+            PasteContent(s) => VTOwnedEvent::PasteContent(s.to_vec()),
+            PasteEnd => VTOwnedEvent::PasteEnd,
             Esc {
                 intermediates,
                 final_byte,
@@ -637,6 +686,9 @@ impl ParamBufOwned {
 pub enum VTOwnedEvent {
     Raw(Vec<u8>),
     C0(u8),
+    PasteStart,
+    PasteContent(Vec<u8>),
+    PasteEnd,
     Esc {
         intermediates: VTIntermediate,
         final_byte: u8,
@@ -682,6 +734,9 @@ impl VTOwnedEvent {
         match self {
             VTOwnedEvent::Raw(s) => VTEvent::Raw(s),
             VTOwnedEvent::C0(b) => VTEvent::C0(*b),
+            VTOwnedEvent::PasteStart => VTEvent::PasteStart,
+            VTOwnedEvent::PasteContent(s) => VTEvent::PasteContent(s),
+            VTOwnedEvent::PasteEnd => VTEvent::PasteEnd,
             VTOwnedEvent::Esc {
                 intermediates,
                 final_byte,

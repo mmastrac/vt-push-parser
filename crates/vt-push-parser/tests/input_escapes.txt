@@ -66,3 +66,30 @@ hello<ESC>aworld
 
 # ESC followed by various C0 controls
 <ESC><NUL><ESC><SOH><ESC><STX>
+
+# Bracketed paste mode start
+<ESC>[200~
+
+# Bracketed paste mode end
+<ESC>[201~
+
+# Bracketed paste with simple text
+<ESC>[200~hello world<ESC>[201~
+
+# Bracketed paste with newlines
+<ESC>[200~line1<LF>line2<LF>line3<ESC>[201~
+
+# Bracketed paste with special characters
+<ESC>[200~!@#$%^&*()<ESC>[201~
+
+# Bracketed paste with control characters
+<ESC>[200~<TAB>text<CR><LF>more<ESC>[201~
+
+# Empty bracketed paste
+<ESC>[200~<ESC>[201~
+
+# Bracketed paste with only whitespace
+<ESC>[200~   <TAB>  <LF><ESC>[201~
+
+# Multiple bracketed pastes in sequence
+<ESC>[200~first<ESC>[201~<ESC>[200~second<ESC>[201~
