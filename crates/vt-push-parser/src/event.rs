@@ -4,6 +4,7 @@ use smallvec::SmallVec;
 
 use crate::AsciiControl;
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
 pub struct VTIntermediate {
     data: [u8; 2],
@@ -91,7 +92,8 @@ impl std::fmt::Debug for VTIntermediate {
 pub(crate) type Param = SmallVec<[u8; 32]>;
 pub(crate) type Params = SmallVec<[Param; 8]>;
 
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct ParamBuf<'a> {
     pub(crate) params: &'a Params,
@@ -145,6 +147,8 @@ impl<'a> ParamBuf<'a> {
     }
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[derive(Clone, PartialEq, Eq)]
 pub enum VTEvent<'a> {
     // Plain printable text from GROUND (coalesced)
     Raw(&'a [u8]),
@@ -557,6 +561,7 @@ impl<'a> VTEvent<'a> {
     }
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[derive(Clone, PartialEq, Eq)]
 pub struct ParamBufOwned {
     pub(crate) params: Params,
@@ -606,6 +611,7 @@ impl ParamBufOwned {
     }
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[derive(Clone, PartialEq, Eq)]
 pub enum VTOwnedEvent {
     Raw(Vec<u8>),

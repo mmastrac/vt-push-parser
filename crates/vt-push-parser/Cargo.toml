@@ -9,8 +9,13 @@ description = "A streaming push parser for the VT protocol"
 readme = "README.md"
 
 [dependencies]
-smallvec = { version = "1.10.0", features = ["const_new", "const_generics"] }
+smallvec = { version = "1.15.0", features = ["const_new", "const_generics"] }
 hex = "0.4.3"
+serde = { version = "1.0", optional = true, features = ["derive"] }
+
+[features]
+default = []
+serde = ["dep:serde", "smallvec/serde"]
 
 [dev-dependencies]
 pretty_assertions = "1.4.0"
