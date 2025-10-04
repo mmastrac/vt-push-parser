@@ -1,4 +1,5 @@
 pub mod ascii;
+pub mod capture;
 pub mod event;
 pub mod iter;
 pub mod signature;
@@ -781,6 +782,16 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                     final_byte: c,
                 }))
             }
+            // NOTE: We assume that we want to stay in the escape state
+            // to recover from this state.
+            ESC => {
+                self.st = Escape;
+                if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
+                    VTAction::None
+                } else {
+                    VTAction::Event(invalid!(self.ints))
+                }
+            }
             c => {
                 self.st = Ground;
                 if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
@@ -803,6 +814,16 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                     VTAction::Event(invalid!(SS2, b))
                 }
             }
+            // NOTE: We assume that we want to stay in the escape state
+            // to recover from this state.
+            ESC => {
+                self.st = Escape;
+                if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
+                    VTAction::None
+                } else {
+                    VTAction::Event(invalid!(SS2))
+                }
+            }
             c => VTAction::Event(VTEvent::Ss2(SS2 { char: c })),
         }
     }
@@ -816,6 +837,16 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                     VTAction::None
                 } else {
                     VTAction::Event(invalid!(SS3, b))
+                }
+            }
+            // NOTE: We assume that we want to stay in the escape state
+            // to recover from this state.
+            ESC => {
+                self.st = Escape;
+                if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
+                    VTAction::None
+                } else {
+                    VTAction::Event(invalid!(SS3))
                 }
             }
             c => VTAction::Event(VTEvent::Ss3(SS3 { char: c })),
