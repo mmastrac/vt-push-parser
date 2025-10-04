@@ -38,7 +38,7 @@ fn fmt_utf8_bytes_simple(f: &mut std::fmt::Formatter<'_>, bytes: &[u8]) -> std::
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
 pub struct VTIntermediate {
-    data: [u8; 2],
+    pub(crate) data: [u8; 2],
 }
 
 impl VTIntermediate {
@@ -72,6 +72,22 @@ impl VTIntermediate {
 
     pub fn len(&self) -> usize {
         self.data.iter().filter(|&&c| c != 0).count()
+    }
+
+    pub fn first(&self) -> Option<u8> {
+        if self.data[0] != 0 {
+            Some(self.data[0])
+        } else {
+            None
+        }
+    }
+
+    pub fn second(&self) -> Option<u8> {
+        if self.data[1] != 0 {
+            Some(self.data[1])
+        } else {
+            None
+        }
     }
 
     #[must_use]
@@ -190,6 +206,9 @@ pub enum VTEvent<'a> {
     // ESC final (with intermediates)
     Esc(Esc),
 
+    // Invalid escape sequence
+    EscInvalid(EscInvalid),
+
     // SS2
     Ss2(SS2),
 
@@ -226,6 +245,7 @@ impl<'a> std::fmt::Debug for VTEvent<'a> {
                 write!(f, "')")?;
                 Ok(())
             }
+            EscInvalid(esc_invalid) => esc_invalid.fmt(f),
             C0(b) => write!(f, "C0({:02x})", b),
             Esc(esc) => esc.fmt(f),
             Ss2(ss2) => ss2.fmt(f),
@@ -278,6 +298,14 @@ impl<'a> VTEvent<'a> {
             Raw(s) => s.len(),
             C0(_) => 1,
             Esc(esc) => esc.intermediates.len() + 2,
+            EscInvalid(esc_invalid) => {
+                use self::EscInvalid::*;
+                match esc_invalid {
+                    One(..) => 2,
+                    Two(..) => 3,
+                    Three(..) => 4,
+                }
+            }
             Ss2(_) => 3,
             Ss3(_) => 3,
             Csi(csi) => {
@@ -327,6 +355,22 @@ impl<'a> VTEvent<'a> {
         match self {
             Raw(s) | OscData(s) | DcsData(s) => {
                 buf[..s.len()].copy_from_slice(s);
+            }
+            EscInvalid(esc_invalid) => {
+                use self::EscInvalid::*;
+                buf[0] = ESC;
+                match esc_invalid {
+                    One(b) => buf[1] = *b,
+                    Two(b1, b2) => {
+                        buf[1] = *b1;
+                        buf[2] = *b2;
+                    }
+                    Three(b1, b2, b3) => {
+                        buf[1] = *b1;
+                        buf[2] = *b2;
+                        buf[3] = *b3;
+                    }
+                }
             }
             OscCancel | DcsCancel => {
                 buf[0] = CAN;
@@ -428,6 +472,7 @@ impl<'a> VTEvent<'a> {
             Raw(s) => VTOwnedEvent::Raw(s.to_vec()),
             C0(b) => VTOwnedEvent::C0(*b),
             Esc(esc) => VTOwnedEvent::Esc(*esc),
+            EscInvalid(esc_invalid) => VTOwnedEvent::EscInvalid(*esc_invalid),
             Ss2(ss2) => VTOwnedEvent::Ss2(*ss2),
             Ss3(ss3) => VTOwnedEvent::Ss3(*ss3),
             Csi(csi) => VTOwnedEvent::Csi(CSIOwned {
@@ -512,6 +557,7 @@ pub enum VTOwnedEvent {
     Raw(Vec<u8>),
     C0(u8),
     Esc(Esc),
+    EscInvalid(EscInvalid),
     Ss2(SS2),
     Ss3(SS3),
     Csi(CSIOwned),
@@ -540,6 +586,7 @@ impl VTOwnedEvent {
                 intermediates: esc.intermediates.clone(),
                 final_byte: esc.final_byte,
             }),
+            VTOwnedEvent::EscInvalid(esc_invalid) => VTEvent::EscInvalid(*esc_invalid),
             VTOwnedEvent::Ss2(ss2) => VTEvent::Ss2(SS2 { char: ss2.char }),
             VTOwnedEvent::Ss3(ss3) => VTEvent::Ss3(SS3 { char: ss3.char }),
             VTOwnedEvent::Csi(csi) => VTEvent::Csi(CSI {
@@ -565,6 +612,26 @@ impl VTOwnedEvent {
             },
             VTOwnedEvent::OscCancel => VTEvent::OscCancel,
         }
+    }
+}
+
+/// An invalid escape sequence.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum EscInvalid {
+    One(u8),
+    Two(u8, u8),
+    Three(u8, u8, u8),
+}
+
+impl std::fmt::Debug for EscInvalid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EscInvalid::One(b) => write!(f, "EscInvalid({:?})", b)?,
+            EscInvalid::Two(b1, b2) => write!(f, "EscInvalid({:?}, {:?})", b1, b2)?,
+            EscInvalid::Three(b1, b2, b3) => write!(f, "EscInvalid({:?}, {:?}, {:?})", b1, b2, b3)?,
+        }
+        Ok(())
     }
 }
 

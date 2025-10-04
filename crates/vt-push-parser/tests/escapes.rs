@@ -24,6 +24,9 @@ macro_rules! callback {
                         result.push(VTAccumulator::Raw(encode_string(s)));
                     }
                 }
+                VTEvent::EscInvalid(esc_invalid) => {
+                    result.push(VTAccumulator::Esc(format!("{esc_invalid:?}")))
+                }
                 VTEvent::Csi { .. } | VTEvent::Esc { .. } | VTEvent::C0(_) => {
                     result.push(VTAccumulator::Esc(format!("{vt_input:?}")))
                 }

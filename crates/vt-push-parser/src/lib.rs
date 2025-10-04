@@ -6,7 +6,7 @@ pub mod signature;
 use smallvec::SmallVec;
 
 use ascii::AsciiControl;
-use event::{CSI, DCS, Esc, SS2, SS3, VTEvent, VTIntermediate};
+use event::{CSI, DCS, Esc, EscInvalid, SS2, SS3, VTEvent, VTIntermediate};
 
 const ESC: u8 = AsciiControl::Esc as _;
 const BEL: u8 = AsciiControl::Bel as _;
@@ -18,6 +18,9 @@ const OSC: u8 = b']';
 const SS2: u8 = b'N';
 const SS3: u8 = b'O';
 const DCS: u8 = b'P';
+const APC: u8 = b'_';
+const PM: u8 = b'^';
+const SOS: u8 = b'X';
 const ST_FINAL: u8 = b'\\';
 
 // Re-export the main types for backward compatibility
@@ -26,7 +29,7 @@ pub use signature::VTEscapeSignature;
 use crate::event::{Param, ParamBuf, Params};
 
 /// The action to take with the most recently accumulated byte.
-pub enum VTAction<'a> {
+enum VTAction<'a> {
     /// The parser will accumulate the byte and continue processing. If
     /// currently buffered, emit the buffered bytes.
     None,
@@ -46,7 +49,7 @@ pub enum VTAction<'a> {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum VTEmit {
+enum VTEmit {
     /// Emit this byte as a ground-state character.
     Ground,
     /// Emit this byte into the current DCS stream.
@@ -56,7 +59,7 @@ pub enum VTEmit {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum VTEnd {
+enum VTEnd {
     /// Emit this byte into the current DCS stream.
     Dcs,
     /// Emit this byte into the current OSC stream.
@@ -138,9 +141,20 @@ pub const VT_PARSER_INTEREST_CSI: u8 = 1 << 0;
 pub const VT_PARSER_INTEREST_DCS: u8 = 1 << 1;
 /// Request OSC events from parser.
 pub const VT_PARSER_INTEREST_OSC: u8 = 1 << 2;
+/// Request escape recovery events from parser.
+pub const VT_PARSER_INTEREST_ESCAPE_RECOVERY: u8 = 1 << 4;
 /// Request other events from parser.
-pub const VT_PARSER_INTEREST_OTHER: u8 = 1 << 3;
+pub const VT_PARSER_INTEREST_OTHER: u8 = 1 << 5;
+
+/// Request all events from parser.
 pub const VT_PARSER_INTEREST_ALL: u8 = VT_PARSER_INTEREST_CSI
+    | VT_PARSER_INTEREST_DCS
+    | VT_PARSER_INTEREST_OSC
+    | VT_PARSER_INTEREST_ESCAPE_RECOVERY
+    | VT_PARSER_INTEREST_OTHER;
+
+/// Default interest level.
+pub const VT_PARSER_INTEREST_DEFAULT: u8 = VT_PARSER_INTEREST_CSI
     | VT_PARSER_INTEREST_DCS
     | VT_PARSER_INTEREST_OSC
     | VT_PARSER_INTEREST_OTHER;
@@ -164,7 +178,7 @@ impl MaybeAbortable for () {
     }
 }
 
-pub struct VTPushParser<const INTEREST: u8 = VT_PARSER_INTEREST_ALL> {
+pub struct VTPushParser<const INTEREST: u8 = VT_PARSER_INTEREST_DEFAULT> {
     st: State,
 
     // Header collectors for short escapes (we borrow from these in callbacks)
@@ -190,6 +204,34 @@ impl VTPushParser {
     pub const fn new_with_interest<const INTEREST: u8>() -> VTPushParser<INTEREST> {
         VTPushParser::new_with()
     }
+}
+
+/// Emit the EscInvalid event
+macro_rules! invalid {
+    ($self:ident .ints, $b:expr) => {
+        if $self.ints.len() == 1 {
+            VTEvent::EscInvalid(EscInvalid::Two($self.ints.data[0], $b))
+        } else {
+            VTEvent::EscInvalid(EscInvalid::Three(
+                $self.ints.data[0],
+                $self.ints.data[1],
+                $b,
+            ))
+        }
+    };
+    ($self:ident .ints) => {
+        if $self.ints.len() == 1 {
+            VTEvent::EscInvalid(EscInvalid::One($self.ints.data[0]))
+        } else {
+            VTEvent::EscInvalid(EscInvalid::Two($self.ints.data[0], $self.ints.data[1]))
+        }
+    };
+    ($a:expr) => {
+        VTEvent::EscInvalid(EscInvalid::One($a))
+    };
+    ($a:expr, $b:expr) => {
+        VTEvent::EscInvalid(EscInvalid::Two($a, $b))
+    };
 }
 
 impl<const INTEREST: u8> VTPushParser<INTEREST> {
@@ -464,6 +506,11 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         input.len()
     }
 
+    /// Returns true if the parser is in the ground state.
+    pub fn is_ground(&self) -> bool {
+        self.st == State::Ground
+    }
+
     /// Feed an idle event into the parser. This will emit a C0(ESC) event if
     /// the parser is in the Escape state, and will silently cancel any EscInt
     /// state.
@@ -473,9 +520,27 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                 self.st = State::Ground;
                 Some(VTEvent::C0(ESC))
             }
-            State::EscInt | State::EscSs2 | State::EscSs3 => {
+            State::EscInt => {
                 self.st = State::Ground;
-                None
+                if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
+                    None
+                } else {
+                    Some(invalid!(self.ints))
+                }
+            }
+            State::EscSs2 | State::EscSs3 => {
+                if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
+                    self.st = State::Ground;
+                    None
+                } else {
+                    let c = match self.st {
+                        State::EscSs2 => SS2,
+                        State::EscSs3 => SS3,
+                        _ => unreachable!(),
+                    };
+                    self.st = State::Ground;
+                    Some(invalid!(c))
+                }
             }
             _ => None,
         }
@@ -511,7 +576,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
-    pub fn finish<F: FnMut(VTEvent)>(&mut self, cb: &mut F) {
+    pub fn finish<F: FnMut(VTEvent)>(&mut self, _cb: &mut F) {
         self.reset_collectors();
         self.st = State::Ground;
 
@@ -598,9 +663,22 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         match b {
             CAN | SUB => {
                 self.st = Ground;
-                VTAction::None
+                if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
+                    VTAction::None
+                } else {
+                    VTAction::Event(invalid!(b))
+                }
             }
-            DEL => VTAction::None,
+            // NOTE: DEL should be ignored normally, but for better recovery,
+            // we move to ground state here instead.
+            DEL => {
+                self.st = Ground;
+                if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
+                    VTAction::None
+                } else {
+                    VTAction::Event(invalid!(b))
+                }
+            }
             c if is_intermediate(c) => {
                 if self.ints.push(c) {
                     self.st = EscInt;
@@ -637,7 +715,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                 self.st = EscSs3;
                 VTAction::None
             }
-            b'X' | b'^' | b'_' => {
+            SOS | PM | APC => {
                 self.st = State::SosPmApcString;
                 VTAction::None
             }
@@ -654,7 +732,11 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
             }
             _ => {
                 self.st = Ground;
-                VTAction::None
+                if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
+                    VTAction::None
+                } else {
+                    VTAction::Event(invalid!(b))
+                }
             }
         }
     }
@@ -664,14 +746,33 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         match b {
             CAN | SUB => {
                 self.st = Ground;
-                VTAction::None
+                if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
+                    VTAction::None
+                } else {
+                    VTAction::Event(invalid!(self.ints, b))
+                }
             }
-            DEL => VTAction::None,
+            // NOTE: DEL should be ignored normally, but for better recovery,
+            // we move to ground state here instead.
+            DEL => {
+                self.st = Ground;
+                if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
+                    VTAction::None
+                } else {
+                    VTAction::Event(invalid!(self.ints, b))
+                }
+            }
             c if is_intermediate(c) => {
                 if !self.ints.push(c) {
                     self.st = Ground;
+                    if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
+                        VTAction::None
+                    } else {
+                        VTAction::Event(invalid!(self.ints, b))
+                    }
+                } else {
+                    VTAction::None
                 }
-                VTAction::None
             }
             c if is_final(c) || is_digit(c) => {
                 self.st = Ground;
@@ -680,9 +781,13 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                     final_byte: c,
                 }))
             }
-            _ => {
+            c => {
                 self.st = Ground;
-                VTAction::None
+                if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
+                    VTAction::None
+                } else {
+                    VTAction::Event(invalid!(self.ints, c))
+                }
             }
         }
     }
@@ -691,7 +796,13 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         use State::*;
         self.st = Ground;
         match b {
-            CAN | SUB => VTAction::None,
+            CAN | SUB => {
+                if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
+                    VTAction::None
+                } else {
+                    VTAction::Event(invalid!(SS2, b))
+                }
+            }
             c => VTAction::Event(VTEvent::Ss2(SS2 { char: c })),
         }
     }
@@ -700,7 +811,13 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         use State::*;
         self.st = Ground;
         match b {
-            CAN | SUB => VTAction::None,
+            CAN | SUB => {
+                if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
+                    VTAction::None
+                } else {
+                    VTAction::Event(invalid!(SS3, b))
+                }
+            }
             c => VTAction::Event(VTEvent::Ss3(SS3 { char: c })),
         }
     }
@@ -1126,9 +1243,8 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
 
 #[cfg(test)]
 mod tests {
-    use pretty_assertions::assert_eq;
-
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn test_edge_cases() {
@@ -1431,5 +1547,49 @@ mod tests {
         assert_eq!(ev[0], "Raw('abc')");
         assert_eq!(ev[1], "C0(18)");
         assert_eq!(ev[2], "Raw('def')");
+    }
+
+    /// Brute force sweep of all three-byte sequences to ensure we can recover
+    /// from all invalid escape sequences (unless CSI/OSC/DCS/SOS/PM/APC).
+    #[test]
+    fn three_byte_sequences_capturable() {
+        let mut bytes = vec![];
+        for i in 0..=0xFFFFFF_u32 {
+            bytes.clear();
+            let test_bytes = i.to_le_bytes();
+            let test_bytes = &test_bytes[..3];
+            if test_bytes.iter().any(|b| b == &0) {
+                continue;
+            }
+            if test_bytes[0] == 0x1b && matches!(test_bytes[1], CSI | DCS | OSC | APC | PM | SOS) {
+                continue;
+            }
+            if test_bytes[1] == 0x1b && matches!(test_bytes[2], CSI | DCS | OSC | APC | PM | SOS) {
+                continue;
+            }
+
+            let mut parser = VTPushParser::<VT_PARSER_INTEREST_ALL>::new_with();
+            parser.feed_with(test_bytes, &mut |event| {
+                let mut chunk = [0_u8; 3];
+                let b = event.encode(&mut chunk).unwrap();
+                bytes.extend_from_slice(&chunk[..b]);
+            });
+            if let Some(event) = parser.idle() {
+                let mut chunk = [0_u8; 3];
+                let b = event.encode(&mut chunk).unwrap();
+                bytes.extend_from_slice(&chunk[..b]);
+            }
+
+            if bytes.len() != 3 || bytes != test_bytes {
+                eprintln!("Failed to parse:");
+                parser.feed_with(test_bytes, &mut |event| {
+                    eprintln!("{:?}", event);
+                });
+                if let Some(event) = parser.idle() {
+                    eprintln!("{:?}", event);
+                }
+                assert_eq!(bytes, test_bytes, "{test_bytes:X?} -> {bytes:X?}");
+            }
+        }
     }
 }
