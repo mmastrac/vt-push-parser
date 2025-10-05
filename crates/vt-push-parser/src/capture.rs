@@ -28,7 +28,7 @@ enum VTCaptureInternal {
     None,
     Count(usize),
     CountUtf8(usize),
-    Terminator(&'static [u8]),
+    Terminator(&'static [u8], usize),
 }
 
 impl VTCaptureInternal {
@@ -77,8 +77,9 @@ impl VTCaptureInternal {
                     None
                 }
             }
-            VTCaptureInternal::Terminator(terminator) => {
-                // Search for the terminator sequence
+            VTCaptureInternal::Terminator(terminator, _found) => {
+                // For now, use the simple approach that works
+                // TODO: Implement proper partial matching across calls
                 if let Some(pos) = input
                     .windows(terminator.len())
                     .position(|window| window == *terminator)
@@ -88,7 +89,14 @@ impl VTCaptureInternal {
                     *self = VTCaptureInternal::None;
                     Some(capture)
                 } else {
-                    None
+                    // No complete terminator found, emit all input and keep looking
+                    if !input.is_empty() {
+                        let (capture, rest) = input.split_at(input.len());
+                        *input = rest;
+                        Some(capture)
+                    } else {
+                        None
+                    }
                 }
             }
         }
@@ -145,7 +153,7 @@ impl VTCapturePushParser {
                                 self.capture = VTCaptureInternal::CountUtf8(count);
                             }
                             VTInputCapture::Terminator(terminator) => {
-                                self.capture = VTCaptureInternal::Terminator(terminator);
+                                self.capture = VTCaptureInternal::Terminator(terminator, 0);
                             }
                         }
                         false // Don't abort parsing
@@ -291,5 +299,36 @@ CaptureEnd
 VTEvent(Csi(, '', 'Y'))
 VTEvent(Raw('raw'))
 "#.trim());
+    }
+
+    #[test]
+    fn test_capture_terminator_partial_match() {
+        let mut output = String::new();
+        let mut parser = VTCapturePushParser::new();
+
+        parser.feed_with(b"start\x1b[200~part\x1b[201ial\x1b[201~end", &mut |event| {
+            output.push_str(&format!("{:?}\n", event));
+            match event {
+                VTCaptureEvent::VTEvent(VTEvent::Csi(csi)) => {
+                    if csi.final_byte == b'~'
+                        && csi.params.try_parse::<usize>(0).unwrap_or(0) == 200
+                    {
+                        VTInputCapture::Terminator(b"\x1b[201~")
+                    } else {
+                        VTInputCapture::None
+                    }
+                }
+                _ => VTInputCapture::None,
+            }
+        });
+
+        assert_eq!(
+            output.trim(),
+            r#"VTEvent(Raw('start'))
+VTEvent(Csi(, '200', '', '~'))
+Capture([112, 97, 114, 116, 27, 91, 50, 48, 49, 105, 97, 108])
+CaptureEnd
+VTEvent(Raw('end'))"#
+        );
     }
 }
