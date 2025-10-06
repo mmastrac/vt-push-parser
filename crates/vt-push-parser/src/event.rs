@@ -664,8 +664,11 @@ pub struct Esc {
 
 impl std::fmt::Debug for Esc {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Esc({:?}", self.intermediates)?;
-        write!(f, ", ")?;
+        write!(f, "Esc(")?;
+        if let Some(p) = self.private {
+            write!(f, "{:?}, ", p as char)?;
+        }
+        write!(f, "{:?}, ", self.intermediates)?;
         if let Ok(c) = AsciiControl::try_from(self.final_byte as char) {
             write!(f, "{c})")?;
         } else {
