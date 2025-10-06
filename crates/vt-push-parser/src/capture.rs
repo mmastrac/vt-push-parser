@@ -356,7 +356,9 @@ VTEvent(Raw('raw'))
             output.trim(),
             r#"VTEvent(Raw('start'))
 VTEvent(Csi('200', '', '~'))
-Capture([112, 97, 114, 116, 27, 91, 50, 48, 49, 105, 97, 108])
+Capture([112, 97, 114, 116])
+Capture([27, 91, 50, 48, 49])
+Capture([105, 97, 108])
 CaptureEnd
 VTEvent(Raw('end'))"#
         );
