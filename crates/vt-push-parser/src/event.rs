@@ -643,8 +643,12 @@ impl std::fmt::Debug for EscInvalid {
         match self {
             EscInvalid::One(b) => write!(f, "EscInvalid(1B {b:02X})")?,
             EscInvalid::Two(b1, b2) => write!(f, "EscInvalid(1B {b1:02X} {b2:02X})")?,
-            EscInvalid::Three(b1, b2, b3) => write!(f, "EscInvalid(1B {b1:02X} {b2:02X} {b3:02X})")?,
-            EscInvalid::Four(b1, b2, b3, b4) => write!(f, "EscInvalid(1B {b1:02X} {b2:02X} {b3:02X} {b4:02X})")?,
+            EscInvalid::Three(b1, b2, b3) => {
+                write!(f, "EscInvalid(1B {b1:02X} {b2:02X} {b3:02X})")?
+            }
+            EscInvalid::Four(b1, b2, b3, b4) => {
+                write!(f, "EscInvalid(1B {b1:02X} {b2:02X} {b3:02X} {b4:02X})")?
+            }
         }
         Ok(())
     }
