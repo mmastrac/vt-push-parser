@@ -1,9 +1,9 @@
 [package]
 name = "vt-push-parser"
-version = "0.8.0"
 description = "A streaming push parser for the VT/xterm output events"
 readme = "README.md"
 
+version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

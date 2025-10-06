@@ -13,15 +13,14 @@ static ANSI_75_PERCENT: LazyLock<String> = LazyLock::new(|| corpus(75));
 static ANSI_100_PERCENT: LazyLock<String> = LazyLock::new(|| corpus(100));
 
 static ESCAPE_CHOICES: LazyLock<Vec<Vec<u8>>> = LazyLock::new(|| {
-    let res = ESCAPE_SEQUENCES
+    ESCAPE_SEQUENCES
         .lines()
         .map(|line| {
             vt_push_parser::ascii::decode_string(line)
                 .as_slice()
                 .to_vec()
         })
-        .collect::<Vec<_>>();
-    res
+        .collect::<Vec<_>>()
 });
 
 /// Generate a corpus with `percent` of the chunks having ANSI escape sequences.

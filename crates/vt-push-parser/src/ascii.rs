@@ -189,9 +189,9 @@ pub fn encode_string(bytes: &[u8]) -> String {
     for chunk in bytes.utf8_chunks() {
         for c in chunk.valid().chars() {
             if let Ok(c) = AsciiControl::try_from(c) {
-                write!(s, "{}", c).unwrap();
+                write!(s, "{c}").unwrap();
             } else {
-                write!(s, "{}", c).unwrap();
+                write!(s, "{c}").unwrap();
             }
         }
         if !chunk.invalid().is_empty() {

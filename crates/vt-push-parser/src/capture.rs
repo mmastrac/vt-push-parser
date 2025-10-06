@@ -115,6 +115,12 @@ pub struct VTCapturePushParser<const INTEREST: u8 = VT_PARSER_INTEREST_DEFAULT> 
     capture: VTCaptureInternal,
 }
 
+impl Default for VTCapturePushParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VTCapturePushParser {
     pub const fn new() -> VTCapturePushParser {
         VTCapturePushParser::new_with_interest::<VT_PARSER_INTEREST_DEFAULT>()
@@ -138,9 +144,7 @@ impl<const INTEREST: u8> VTCapturePushParser<INTEREST> {
     }
 
     pub fn idle(&mut self) -> Option<VTCaptureEvent<'static>> {
-        self.parser
-            .idle()
-            .map(|event| VTCaptureEvent::VTEvent(event))
+        self.parser.idle().map(VTCaptureEvent::VTEvent)
     }
 
     pub fn feed_with<'this, 'input, F: for<'any> FnMut(VTCaptureEvent<'any>) -> VTInputCapture>(
@@ -198,7 +202,7 @@ mod tests {
         let mut output = String::new();
         let mut parser = VTCapturePushParser::new();
         parser.feed_with(b"raw\x1b[200~paste\x1b[201~raw", &mut |event| {
-            output.push_str(&format!("{:?}\n", event));
+            output.push_str(&format!("{event:?}\n"));
             match event {
                 VTCaptureEvent::VTEvent(VTEvent::Csi(csi)) => {
                     if csi.params.try_parse::<usize>(0).unwrap_or(0) == 200 {
@@ -228,7 +232,7 @@ VTEvent(Raw('raw'))
         let mut output = String::new();
         let mut parser = VTCapturePushParser::new();
         parser.feed_with(b"raw\x1b[Xpaste\x1b[Yraw", &mut |event| {
-            output.push_str(&format!("{:?}\n", event));
+            output.push_str(&format!("{event:?}\n"));
             match event {
                 VTCaptureEvent::VTEvent(VTEvent::Csi(csi)) => {
                     if csi.final_byte == b'X' {
@@ -259,7 +263,7 @@ VTEvent(Raw('raw'))
         let mut output = String::new();
         let mut parser = VTCapturePushParser::new();
         parser.feed_with(b"raw\x1b[Xpaste\x1b[Yraw", &mut |event| {
-            output.push_str(&format!("{:?}\n", event));
+            output.push_str(&format!("{event:?}\n"));
             match event {
                 VTCaptureEvent::VTEvent(VTEvent::Csi(csi)) => {
                     if csi.final_byte == b'X' {
@@ -291,7 +295,7 @@ VTEvent(Raw('raw'))
         let mut parser = VTCapturePushParser::new();
         let input = "raw\u{001b}[X🤖🦕✅😀🕓\u{001b}[Yraw".as_bytes();
         parser.feed_with(input, &mut |event| {
-            output.push_str(&format!("{:?}\n", event));
+            output.push_str(&format!("{event:?}\n"));
             match event {
                 VTCaptureEvent::VTEvent(VTEvent::Csi(csi)) => {
                     if csi.final_byte == b'X' {
@@ -319,7 +323,7 @@ VTEvent(Raw('raw'))
         let mut parser = VTCapturePushParser::new();
 
         parser.feed_with(b"start\x1b[200~part\x1b[201ial\x1b[201~end", &mut |event| {
-            output.push_str(&format!("{:?}\n", event));
+            output.push_str(&format!("{event:?}\n"));
             match event {
                 VTCaptureEvent::VTEvent(VTEvent::Csi(csi)) => {
                     if csi.final_byte == b'~'

@@ -122,7 +122,7 @@ const fn is_final(b: u8) -> bool {
 }
 #[inline]
 fn is_digit(b: u8) -> bool {
-    (b'0'..=b'9').contains(&b)
+    b.is_ascii_digit()
 }
 #[inline]
 fn is_priv(b: u8) -> bool {
@@ -229,6 +229,12 @@ pub struct VTPushParser<const INTEREST: u8 = VT_PARSER_INTEREST_DEFAULT> {
     cur_param: Param,
     priv_prefix: Option<u8>,
     held_byte: Option<u8>,
+}
+
+impl Default for VTPushParser {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl VTPushParser {
@@ -409,16 +415,14 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                     i += 1;
                 }
 
-                if start != i {
-                    if cb(VTEvent::Raw(&input[start..i])).abort() {
-                        return i;
-                    }
+                if start != i && cb(VTEvent::Raw(&input[start..i])).abort() {
+                    return i;
                 }
 
                 if input[i] == ESC {
                     self.clear_hdr_collectors();
                     self.st = State::Escape;
-                    i = i + 1;
+                    i += 1;
                     continue;
                 }
             }
@@ -451,19 +455,18 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                     if let Some(emit) = state.current_emit {
                         // We received a DEL during an emit, so we need to partially emit our buffer
                         let range = state.buffer_idx..(i - state.hold as usize);
-                        if !range.is_empty() {
-                            if match emit {
+                        if !range.is_empty()
+                            && match emit {
                                 VTEmit::Ground => cb(VTEvent::Raw(&input[range])),
                                 VTEmit::Dcs => cb(VTEvent::DcsData(&input[range])),
                                 VTEmit::Osc => cb(VTEvent::OscData(&input[range])),
                             }
                             .abort()
-                            {
-                                if state.hold {
-                                    self.held_byte = Some(0x1b);
-                                }
-                                return i + 1;
+                        {
+                            if state.hold {
+                                self.held_byte = Some(0x1b);
                             }
+                            return i + 1;
                         }
                         if state.hold {
                             held_byte = Some(0x1b);
@@ -1322,27 +1325,27 @@ mod tests {
     fn test_edge_cases() {
         // Test empty input
         let mut result = String::new();
-        VTPushParser::decode_buffer(&[], |e| result.push_str(&format!("{:?}\n", e)));
+        VTPushParser::decode_buffer(&[], |e| result.push_str(&format!("{e:?}\n")));
         assert_eq!(result.trim(), "");
 
         // Test single ESC
         let mut result = String::new();
-        VTPushParser::decode_buffer(b"\x1b", |e| result.push_str(&format!("{:?}\n", e)));
+        VTPushParser::decode_buffer(b"\x1b", |e| result.push_str(&format!("{e:?}\n")));
         assert_eq!(result.trim(), "");
 
         // Test incomplete CSI
         let mut result = String::new();
-        VTPushParser::decode_buffer(b"\x1b[", |e| result.push_str(&format!("{:?}\n", e)));
+        VTPushParser::decode_buffer(b"\x1b[", |e| result.push_str(&format!("{e:?}\n")));
         assert_eq!(result.trim(), "");
 
         // Test incomplete DCS
         let mut result = String::new();
-        VTPushParser::decode_buffer(b"\x1bP", |e| result.push_str(&format!("{:?}\n", e)));
+        VTPushParser::decode_buffer(b"\x1bP", |e| result.push_str(&format!("{e:?}\n")));
         assert_eq!(result.trim(), "");
 
         // Test incomplete OSC
         let mut result = String::new();
-        VTPushParser::decode_buffer(b"\x1b]", |e| result.push_str(&format!("{:?}\n", e)));
+        VTPushParser::decode_buffer(b"\x1b]", |e| result.push_str(&format!("{e:?}\n")));
         assert_eq!(result.trim(), "OscStart");
     }
 
@@ -1352,7 +1355,7 @@ mod tests {
         let mut parser = VTPushParser::new(); // Small flush size
         let mut result = String::new();
         let mut callback = |vt_input: VTEvent<'_>| {
-            result.push_str(&format!("{:?}\n", vt_input));
+            result.push_str(&format!("{vt_input:?}\n"));
         };
 
         // Feed DCS data in chunks
@@ -1372,7 +1375,7 @@ mod tests {
         let mut parser = VTPushParser::new();
         let mut result = String::new();
         let mut callback = |vt_input: VTEvent<'_>| {
-            result.push_str(&format!("{:?}\n", vt_input));
+            result.push_str(&format!("{vt_input:?}\n"));
         };
 
         // Start an incomplete sequence
@@ -1466,7 +1469,7 @@ mod tests {
     fn collect_events(input: &[u8]) -> Vec<String> {
         let mut out = Vec::new();
         let mut p = VTPushParser::new();
-        p.feed_with(input, &mut |ev| out.push(format!("{:?}", ev)));
+        p.feed_with(input, &mut |ev| out.push(format!("{ev:?}")));
         out
     }
 
@@ -1539,7 +1542,7 @@ mod tests {
     fn collect_debug(input: &[u8]) -> Vec<String> {
         let mut out = Vec::new();
         let mut p = VTPushParser::new();
-        p.feed_with(input, &mut |ev| out.push(format!("{:?}", ev)));
+        p.feed_with(input, &mut |ev| out.push(format!("{ev:?}")));
         out
     }
 
@@ -1655,10 +1658,10 @@ mod tests {
             if bytes.len() != 3 || bytes != test_bytes {
                 eprintln!("Failed to parse:");
                 parser.feed_with(test_bytes, &mut |event| {
-                    eprintln!("{:?}", event);
+                    eprintln!("{event:?}");
                 });
                 if let Some(event) = parser.idle() {
-                    eprintln!("{:?}", event);
+                    eprintln!("{event:?}");
                 }
                 assert_eq!(bytes, test_bytes, "{test_bytes:X?} -> {bytes:X?}");
             }

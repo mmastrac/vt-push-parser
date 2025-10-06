@@ -76,7 +76,7 @@ enum ParseMode {
 
 impl ParseMode {
     pub fn all() -> &'static [ParseMode] {
-        return &[ParseMode::Normal, ParseMode::Abortable, ParseMode::Aborted];
+        &[ParseMode::Normal, ParseMode::Abortable, ParseMode::Aborted]
     }
 }
 
@@ -161,16 +161,18 @@ fn test(output: &mut String, test_name: &str, line: &str, decoded: &[u8]) {
     let mut text_test = b"text content test:<".to_vec();
     text_test.extend_from_slice(decoded);
     text_test.extend_from_slice(b">suffix text context");
-    VTPushParser::decode_buffer(&text_test, |event| match event {
-        VTEvent::Raw(s) => text_content.push_str(String::from_utf8_lossy(s).as_ref()),
-        _ => {}
+    VTPushParser::decode_buffer(&text_test, |event| {
+        if let VTEvent::Raw(s) = event {
+            text_content.push_str(String::from_utf8_lossy(s).as_ref())
+        }
     });
 
     let mut text_content_interest_none = String::new();
     let mut parser = VTPushParser::new_with_interest::<{ VT_PARSER_INTEREST_NONE }>();
-    parser.feed_with(&text_test, &mut |event| match event {
-        VTEvent::Raw(s) => text_content_interest_none.push_str(String::from_utf8_lossy(s).as_ref()),
-        _ => {}
+    parser.feed_with(&text_test, &mut |event| {
+        if let VTEvent::Raw(s) = event {
+            text_content_interest_none.push_str(String::from_utf8_lossy(s).as_ref())
+        }
     });
     assert_eq!(text_content, text_content_interest_none);
 
@@ -229,7 +231,7 @@ fn test(output: &mut String, test_name: &str, line: &str, decoded: &[u8]) {
     {
         let mut re_encoded = Vec::new();
         let mut raw_del = false;
-        VTPushParser::decode_buffer(&decoded, |event| {
+        VTPushParser::decode_buffer(decoded, |event| {
             let mut buffer = [0_u8; 1024];
             let n = event.encode(&mut buffer).unwrap();
             re_encoded.extend_from_slice(&buffer[..n]);
@@ -242,7 +244,7 @@ fn test(output: &mut String, test_name: &str, line: &str, decoded: &[u8]) {
             decoded.to_vec()
         } else {
             decoded
-                .into_iter()
+                .iter()
                 .cloned()
                 .filter(|b| *b != 0x7F)
                 .collect::<Vec<_>>()
@@ -254,7 +256,7 @@ fn test(output: &mut String, test_name: &str, line: &str, decoded: &[u8]) {
         }
     }
 
-    output.push_str(&format!("## {test_name}\n```\n{}\n```\n\n", line));
+    output.push_str(&format!("## {test_name}\n```\n{line}\n```\n\n"));
     output.push_str("```\n");
     output.push_str(&result);
     output.push_str("```\n");
@@ -287,14 +289,14 @@ pub fn main() {
         }
 
         let decoded = decode_string(line);
-        println!("  running {:?} ...", test_name);
+        println!("  running {test_name:?} ...");
         let test_name_clone = test_name.clone();
         let Ok(test_output) = std::panic::catch_unwind(move || {
             let mut output = String::new();
             test(&mut output, &test_name_clone, line, &decoded);
             output
         }) else {
-            eprintln!("  test {:?} panicked", test_name);
+            eprintln!("  test {test_name:?} panicked");
             failures += 1;
             continue;
         };
@@ -304,7 +306,7 @@ pub fn main() {
     println!();
 
     if failures > 0 {
-        eprintln!("{} tests failed", failures);
+        eprintln!("{failures} tests failed");
         std::process::exit(1);
     }
 
