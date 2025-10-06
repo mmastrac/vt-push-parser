@@ -1,12 +1,13 @@
 [package]
 name = "vt-push-parser"
 version = "0.7.0"
-edition = "2024"
-authors = ["Matt Mastracci <matthew@mastracci.com>"]
-license = "Apache-2.0 OR MIT"
-repository = "https://github.com/mmastrac/vt-push-parser"
 description = "A streaming push parser for the VT/xterm output events"
 readme = "README.md"
+
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 smallvec = { version = "1.15.0", features = ["const_new", "const_generics"] }

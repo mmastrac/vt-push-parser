@@ -1,16 +1,17 @@
 [package]
 name = "fast-strip-ansi"
-version = "0.5.0"
-edition = "2024"
-authors = ["Matt Mastracci <matthew@mastracci.com>"]
-license = "Apache-2.0 OR MIT"
-repository = "https://github.com/mmastrac/vt-push-parser"
+version = "0.6.0"
 description = "A performance-optimized, low-allocation ANSI escape sequence stripper"
 readme = "README.md"
+
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [lib]
 
 [dependencies]
-vt-push-parser = { version = "0.7.0", path = "../vt-push-parser" }
+vt-push-parser.workspace = true
 
 [dev-dependencies]
