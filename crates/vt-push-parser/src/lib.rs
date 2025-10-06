@@ -11,7 +11,7 @@
 //! parser.feed_with(b"\x1b[32mHello, world!\x1b[0m", &mut |event| {
 //!     output.push_str(&format!("{:?}", event));
 //! });
-//! assert_eq!(output, "Csi(, '32', '', 'm')Raw('Hello, world!')Csi(, '0', '', 'm')");
+//! assert_eq!(output, "Csi('32', '', 'm')Raw('Hello, world!')Csi('0', '', 'm')");
 //! ```
 //!
 //! ## Interest
@@ -1403,7 +1403,7 @@ mod tests {
 
         assert_eq!(
             result.trim(),
-            "DcsStart(, '1', '2', '3', ' ', |)\nDcsData('data')\nDcsData(' more')\nDcsEnd('')"
+            "DcsStart('1', '2', '3', ' ', |)\nDcsData('data')\nDcsData(' more')\nDcsEnd('')"
         );
     }
 
@@ -1594,7 +1594,7 @@ mod tests {
         let ev = collect_debug(&s);
 
         assert_eq!(ev.len(), 4, "{ev:#?}");
-        assert_eq!(ev[0], "DcsStart(, '', q)");
+        assert_eq!(ev[0], "DcsStart('', q)");
         assert_eq!(ev[1], "DcsCancel");
         assert_eq!(ev[2], "Raw('IGNORED')");
         assert_eq!(ev[3], "Esc('', \\)");
@@ -1611,7 +1611,7 @@ mod tests {
         let ev = collect_debug(&s);
 
         assert_eq!(ev.len(), 4, "{ev:#?}");
-        assert_eq!(ev[0], "DcsStart(, '', q)");
+        assert_eq!(ev[0], "DcsStart('', q)");
         assert_eq!(ev[1], "DcsCancel");
         assert_eq!(ev[2], "Raw('MORE')");
         assert_eq!(ev[3], "Esc('', \\)");

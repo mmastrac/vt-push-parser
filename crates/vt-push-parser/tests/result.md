@@ -14,15 +14,15 @@ Csi('?', '25', '1', '2', '3:4', '5', '6', '7', '8', '9', '10', '11', '12', '13',
 ```
 
 ```
-Csi(, '', 'I')
+Csi('', 'I')
 TERM2 3.5.14n
 OscStart, data=10;rgb:dcaa/dcab/dcaa
 OscStart, data=11;rgb:158e/193a/1e75
 Csi('?', '64', '1', '2', '4', '6', '17', '18', '21', '22', '', 'c')
 Csi('>', '64', '2500', '0', '', 'c')
-DcsStart(, '!', |), data=6954726D
+DcsStart('!', |), data=6954726D
 DcsStart('>', '', |), data=iTerm2 3.5.14
-Csi(, '8', '34', '148', '', 't')
+Csi('8', '34', '148', '', 't')
 ```
 ---
 ## No escapes, just control chars
@@ -63,7 +63,7 @@ World
 ```
 
 ```
-Csi(, '1', '2', '3', '', 'd')
+Csi('1', '2', '3', '', 'd')
 ```
 ---
 ## CSI: Show cursor (private parameter ?25, final h)
@@ -81,7 +81,7 @@ Csi('?', '25', '', 'h')
 ```
 
 ```
-Csi(, '1', '2', '3', '4', '5', '', 'm')
+Csi('1', '2', '3', '4', '5', '', 'm')
 ```
 ---
 ## CSI: Set graphics mode with colon parameter (3:1,2,3,4,5, final m)
@@ -90,7 +90,7 @@ Csi(, '1', '2', '3', '4', '5', '', 'm')
 ```
 
 ```
-Csi(, '3:1', '2', '3', '4', '5', '', 'm')
+Csi('3:1', '2', '3', '4', '5', '', 'm')
 ```
 ---
 ## CSI: Cursor up with intermediate space character (final M)
@@ -99,7 +99,7 @@ Csi(, '3:1', '2', '3', '4', '5', '', 'm')
 ```
 
 ```
-Csi(, ' ', 'M')
+Csi(' ', 'M')
 ```
 ---
 ## OSC: Two OSC in a row
@@ -145,7 +145,7 @@ OscStart, data=12;test [data
 ```
 
 ```
-DcsStart(, ' ', 1), data=;2;3|test data
+DcsStart(' ', 1), data=;2;3|test data
 ```
 ---
 ## DCS: Device control string with private parameter > and payload terminated by ST
@@ -163,7 +163,7 @@ DcsStart('>', '1', '2', '3', '', |), data=more data
 ```
 
 ```
-DcsStart(, ' ', 1), data=;2;3  |data
+DcsStart(' ', 1), data=;2;3  |data
 ```
 ---
 ## DCS: Device control string with final r and payload terminated by ST
@@ -172,7 +172,7 @@ DcsStart(, ' ', 1), data=;2;3  |data
 ```
 
 ```
-DcsStart(, '1', '$', r), data=
+DcsStart('1', '$', r), data=
 ```
 ---
 ## ESC: Escape sequence with intermediate space and final M
@@ -208,7 +208,7 @@ Ss2('A')
 ```
 
 ```
-DcsStart(, '', q), data=<ESC>[38:2:12:34:56m
+DcsStart('', q), data=<ESC>[38:2:12:34:56m
 ```
 ---
 ## DCS: Device control string with colon parameter (invalid/DCS_IGNORE) cancelled by CAN
@@ -278,7 +278,7 @@ x<ESC>P 1;2;3|data<CAN>y
 
 ```
 x
-DcsStart(, ' ', 1) (cancelled)
+DcsStart(' ', 1) (cancelled)
 y
 ```
 ---
@@ -300,7 +300,7 @@ x<ESC>[1;2;3gy
 
 ```
 x
-Csi(, '1', '2', '3', '', 'g')
+Csi('1', '2', '3', '', 'g')
 y
 ```
 ---
@@ -311,7 +311,7 @@ x<ESC>[:1;2;3gy
 
 ```
 x
-Csi(, ':1', '2', '3', '', 'g')
+Csi(':1', '2', '3', '', 'g')
 y
 ```
 ---
@@ -322,7 +322,7 @@ y
 
 ```
 C0(1b)
-Csi(, '1', '2', '3', '', 'd')
+Csi('1', '2', '3', '', 'd')
 ```
 ---
 ## DCS: Device control string with double ESC in payload
@@ -331,7 +331,7 @@ Csi(, '1', '2', '3', '', 'd')
 ```
 
 ```
-DcsStart(, ' ', 1), data=;2;3|<ESC><ESC>data
+DcsStart(' ', 1), data=;2;3|<ESC><ESC>data
 ```
 ---
 ## DCS: Device control string with ESC before ending
@@ -340,7 +340,7 @@ DcsStart(, ' ', 1), data=;2;3|<ESC><ESC>data
 ```
 
 ```
-DcsStart(, ' ', 1), data=;2;3|<ESC>
+DcsStart(' ', 1), data=;2;3|<ESC>
 ```
 ---
 ## DCS: Device control string with double ESC before ending
@@ -349,7 +349,7 @@ DcsStart(, ' ', 1), data=;2;3|<ESC>
 ```
 
 ```
-DcsStart(, ' ', 1), data=;2;3|<ESC><ESC>
+DcsStart(' ', 1), data=;2;3|<ESC><ESC>
 ```
 ---
 ## CSI: Graphics mode with DEL character in parameters
@@ -358,7 +358,7 @@ DcsStart(, ' ', 1), data=;2;3|<ESC><ESC>
 ```
 
 ```
-Csi(, '1', '2', '3', '', 'm')
+Csi('1', '2', '3', '', 'm')
 ```
 ---
 ## DCS: Device control string with colon parameter (invalid) in text context
@@ -385,7 +385,7 @@ Hello
 ```
 
 ```
-DcsStart(, '1', '2', '3', '', |), data=data
+DcsStart('1', '2', '3', '', |), data=data
 Hello
 ```
 ---
@@ -395,7 +395,7 @@ Hello
 ```
 
 ```
-Csi(, '38:2:255:128:64', '', 'm')
+Csi('38:2:255:128:64', '', 'm')
 ```
 ---
 ## CSI: BG truecolor
@@ -404,7 +404,7 @@ Csi(, '38:2:255:128:64', '', 'm')
 ```
 
 ```
-Csi(, '48:2:0:0:0', '', 'm')
+Csi('48:2:0:0:0', '', 'm')
 ```
 ---
 ## CSI: FG indexed
@@ -413,7 +413,7 @@ Csi(, '48:2:0:0:0', '', 'm')
 ```
 
 ```
-Csi(, '38:5:208', '', 'm')
+Csi('38:5:208', '', 'm')
 ```
 ---
 ## CSI: BG indexed
@@ -422,7 +422,7 @@ Csi(, '38:5:208', '', 'm')
 ```
 
 ```
-Csi(, '48:5:123', '', 'm')
+Csi('48:5:123', '', 'm')
 ```
 ---
 ## CSI: Bold + FG indexed + BG truecolor
@@ -431,7 +431,7 @@ Csi(, '48:5:123', '', 'm')
 ```
 
 ```
-Csi(, '1', '38:5:208', '48:2:30:30:30', '', 'm')
+Csi('1', '38:5:208', '48:2:30:30:30', '', 'm')
 ```
 ---
 ## CSI: Reset + FG truecolor
@@ -440,7 +440,7 @@ Csi(, '1', '38:5:208', '48:2:30:30:30', '', 'm')
 ```
 
 ```
-Csi(, '0', '38:2:12:34:56', '', 'm')
+Csi('0', '38:2:12:34:56', '', 'm')
 ```
 ---
 ## CSI: Underline color truecolor with empty subparam (::)
@@ -449,7 +449,7 @@ Csi(, '0', '38:2:12:34:56', '', 'm')
 ```
 
 ```
-Csi(, '58:2::186:93:0', '', 'm')
+Csi('58:2::186:93:0', '', 'm')
 ```
 ---
 ## CSI: FG truecolor + BG indexed + underline color truecolor
@@ -458,7 +458,7 @@ Csi(, '58:2::186:93:0', '', 'm')
 ```
 
 ```
-Csi(, '38:2:10:20:30', '48:5:17', '58:2::200:100:0', '', 'm')
+Csi('38:2:10:20:30', '48:5:17', '58:2::200:100:0', '', 'm')
 ```
 ---
 ## CSI: Colon params with leading zeros
@@ -467,7 +467,7 @@ Csi(, '38:2:10:20:30', '48:5:17', '58:2::200:100:0', '', 'm')
 ```
 
 ```
-Csi(, '38:2:000:007:042', '', 'm')
+Csi('38:2:000:007:042', '', 'm')
 ```
 ---
 ## CSI: Large RGB values
@@ -476,7 +476,7 @@ Csi(, '38:2:000:007:042', '', 'm')
 ```
 
 ```
-Csi(, '38:2:300:300:300', '', 'm')
+Csi('38:2:300:300:300', '', 'm')
 ```
 ---
 ## CSI: Trailing semicolon with colon param (empty final param)
@@ -485,7 +485,7 @@ Csi(, '38:2:300:300:300', '', 'm')
 ```
 
 ```
-Csi(, '38:5:15', '', '', 'm')
+Csi('38:5:15', '', '', 'm')
 ```
 ---
 ## CSI: Only colon param (no numeric params)
@@ -494,7 +494,7 @@ Csi(, '38:5:15', '', '', 'm')
 ```
 
 ```
-Csi(, '38:2:1:2:3', '', 'm')
+Csi('38:2:1:2:3', '', 'm')
 ```
 ---
 ## OSC: DEL ignored inside
@@ -512,7 +512,7 @@ OscStart, data=11;rgb:000/fff/000
 ```
 
 ```
-DcsStart(, '1', '2', '3', '', |), data=<ESC><ESC>data
+DcsStart('1', '2', '3', '', |), data=<ESC><ESC>data
 ```
 ---
 ## DCS: DEL ignored inside after double escape
@@ -521,7 +521,7 @@ DcsStart(, '1', '2', '3', '', |), data=<ESC><ESC>data
 ```
 
 ```
-DcsStart(, '1', '2', '3', '', |), data=<ESC><ESC>data
+DcsStart('1', '2', '3', '', |), data=<ESC><ESC>data
 ```
 ---
 ## ESC: Escape sequence with final c (RIS - Reset to Initial State)

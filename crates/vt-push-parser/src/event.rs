@@ -727,15 +727,15 @@ impl<'a> std::fmt::Debug for CSI<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Csi(")?;
         if let Some(p) = self.private {
-            write!(f, "{:?}", p as char)?;
+            write!(f, "{:?}, ", p as char)?;
         }
         for param in &self.params {
-            write!(f, ", '")?;
-            fmt_utf8_bytes_simple(f, param)?;
             write!(f, "'")?;
+            fmt_utf8_bytes_simple(f, param)?;
+            write!(f, "', ")?;
         }
-        write!(f, ", {:?}", self.intermediates)?;
-        write!(f, ", {:?})", self.final_byte as char)?;
+        write!(f, "{:?}, ", self.intermediates)?;
+        write!(f, "{:?})", self.final_byte as char)?;
         Ok(())
     }
 }
@@ -753,15 +753,15 @@ impl<'a> std::fmt::Debug for DCS<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "DcsStart(")?;
         if let Some(p) = self.private {
-            write!(f, "{:?}", p as char)?;
+            write!(f, "{:?}, ", p as char)?;
         }
         for param in &self.params {
-            write!(f, ", '")?;
-            fmt_utf8_bytes_simple(f, param)?;
             write!(f, "'")?;
+            fmt_utf8_bytes_simple(f, param)?;
+            write!(f, "', ")?;
         }
-        write!(f, ", {:?}", self.intermediates)?;
-        write!(f, ", {})", self.final_byte as char)?;
+        write!(f, "{:?}, ", self.intermediates)?;
+        write!(f, "{})", self.final_byte as char)?;
         Ok(())
     }
 }

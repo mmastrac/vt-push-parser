@@ -218,7 +218,7 @@ mod tests {
             output.trim(),
             r#"
 VTEvent(Raw('raw'))
-VTEvent(Csi(, '200', '', '~'))
+VTEvent(Csi('200', '', '~'))
 Capture([112, 97, 115, 116, 101])
 CaptureEnd
 VTEvent(Raw('raw'))
@@ -248,10 +248,10 @@ VTEvent(Raw('raw'))
             output.trim(),
             r#"
 VTEvent(Raw('raw'))
-VTEvent(Csi(, '', 'X'))
+VTEvent(Csi('', 'X'))
 Capture([112, 97, 115, 116, 101])
 CaptureEnd
-VTEvent(Csi(, '', 'Y'))
+VTEvent(Csi('', 'Y'))
 VTEvent(Raw('raw'))
 "#
             .trim()
@@ -279,10 +279,10 @@ VTEvent(Raw('raw'))
             output.trim(),
             r#"
 VTEvent(Raw('raw'))
-VTEvent(Csi(, '', 'X'))
+VTEvent(Csi('', 'X'))
 Capture([112, 97, 115, 116, 101])
 CaptureEnd
-VTEvent(Csi(, '', 'Y'))
+VTEvent(Csi('', 'Y'))
 VTEvent(Raw('raw'))
 "#
             .trim()
@@ -309,10 +309,10 @@ VTEvent(Raw('raw'))
         });
         assert_eq!(output.trim(), r#"
 VTEvent(Raw('raw'))
-VTEvent(Csi(, '', 'X'))
+VTEvent(Csi('', 'X'))
 Capture([240, 159, 164, 150, 240, 159, 166, 149, 226, 156, 133, 240, 159, 152, 128, 240, 159, 149, 147])
 CaptureEnd
-VTEvent(Csi(, '', 'Y'))
+VTEvent(Csi('', 'Y'))
 VTEvent(Raw('raw'))
 "#.trim());
     }
@@ -341,7 +341,7 @@ VTEvent(Raw('raw'))
         assert_eq!(
             output.trim(),
             r#"VTEvent(Raw('start'))
-VTEvent(Csi(, '200', '', '~'))
+VTEvent(Csi('200', '', '~'))
 Capture([112, 97, 114, 116, 27, 91, 50, 48, 49, 105, 97, 108])
 CaptureEnd
 VTEvent(Raw('end'))"#
