@@ -193,6 +193,52 @@ impl<'a> ParamBuf<'a> {
     pub fn byte_len(&self) -> usize {
         self.params.iter().map(|p| p.len()).sum::<usize>() + self.params.len().saturating_sub(1)
     }
+
+    pub fn numeric(&self) -> NumericParamBuf<'a> {
+        NumericParamBuf {
+            params: self.params,
+        }
+    }
+}
+
+/// A view into a [`Param`] that contains only numeric parameters.
+pub struct NumericParam<'a> {
+    pub(crate) param: &'a [u8],
+}
+
+impl<'a> IntoIterator for NumericParam<'a> {
+    type Item = Option<u16>;
+    type IntoIter = Map<std::slice::Split<'a, u8, fn(&u8) -> bool>, fn(&'a [u8]) -> Option<u16>>;
+    fn into_iter(self) -> Self::IntoIter {
+        let fn1: fn(&u8) -> bool = |c: &u8| *c == b':';
+        self.param.split(fn1).map(|p| {
+            if p.is_empty() {
+                None
+            } else {
+                std::str::from_utf8(p)
+                    .ok()
+                    .and_then(|s| s.parse::<u16>().ok())
+            }
+        })
+    }
+}
+
+/// A view into a [`ParamBuf`] that contains only numeric parameters.
+///
+/// Each parameter may contain zero or more numeric values, separated by colons.
+/// Empty parameters are interpreted as `None`.
+pub struct NumericParamBuf<'a> {
+    pub(crate) params: &'a Params,
+}
+
+impl<'a> IntoIterator for NumericParamBuf<'a> {
+    type Item = NumericParam<'a>;
+    type IntoIter = Map<std::slice::Iter<'a, Param>, fn(&'a Param) -> NumericParam<'a>>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.params.iter().map(|p| NumericParam {
+            param: p.as_slice(),
+        })
+    }
 }
 
 /// A union of all possible events that can be emitted by the parser, with
@@ -516,7 +562,7 @@ impl<'a> VTEvent<'a> {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct ParamBufOwned {
     pub(crate) params: Params,
 }
@@ -538,6 +584,20 @@ impl<'b> IntoIterator for &'b ParamBufOwned {
 }
 
 impl ParamBufOwned {
+    /// Create an empty `ParamBufOwned`.
+    pub const fn empty() -> Self {
+        Self {
+            params: SmallVec::new_const(),
+        }
+    }
+
+    /// Create a `ParamBufOwned` from a slice of slices.
+    pub fn new(params: &[&[u8]]) -> Self {
+        Self {
+            params: params.iter().map(|p| Param::from(*p)).collect(),
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.params.len()
     }
@@ -560,6 +620,12 @@ impl ParamBufOwned {
 
     pub fn borrow(&self) -> ParamBuf<'_> {
         ParamBuf {
+            params: &self.params,
+        }
+    }
+
+    pub fn numeric(&self) -> NumericParamBuf<'_> {
+        NumericParamBuf {
             params: &self.params,
         }
     }
@@ -815,5 +881,20 @@ impl std::fmt::Debug for DCSOwned {
         write!(f, ", {:?}", self.intermediates)?;
         write!(f, ", {})", self.final_byte as char)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_numeric_param_buf() {
+        let param_buf = ParamBufOwned::new(&[b"1:2:3", b"4", b":"]);
+        let numeric_param_buf = param_buf.numeric();
+        assert_eq!(
+            numeric_param_buf.into_iter().flatten().collect::<Vec<_>>(),
+            vec![Some(1), Some(2), Some(3), Some(4), None, None]
+        );
     }
 }
