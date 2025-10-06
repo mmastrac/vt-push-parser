@@ -1,6 +1,7 @@
 # fast-strip-ansi
 
-A performance-optimized ANSI escape sequence stripper.
+A performance-optimized ANSI escape sequence stripper, built on top of the
+[`vt-push-parser`](https://docs.rs/vt-push-parser) crate.
 
 Full VT-100/ANSI support.
 
@@ -9,8 +10,11 @@ No startup cost for regex compilation.
 ## Usage
 
 ```rust
-let input = b"Hello, world!\x1b[31mHello, world!\x1b[0m";
-let output = strip_ansi_string(input);
+use fast_strip_ansi::*;
+let input = b"Hello, world!\x1b[31m\nHello, world!\x1b[0m";
+assert_eq!(strip_ansi_bytes(input), b"Hello, world!\nHello, world!".as_slice());
+let input = "Hello, world!\x1b[31m\nHello, world!\x1b[0m";
+assert_eq!(strip_ansi_string(input), "Hello, world!\nHello, world!");
 ```
 
 ## Security and Correctness
@@ -36,9 +40,12 @@ xychart
     y-axis "Time (in µs)" 0 --> 100
     bar [22.12, 11.26, 39.05, 292.5]
     bar [11.89, 6.841, 19.21, 277.4]
+
+%% Your markdown viewer may not render the chart correctly.
+%% View in a mermaid chart viewer like <https://mermaid.live>
 ```
 
-Raw performance data:
+### Raw performance data:
 
 _from `cargo bench` on an M3 MacBook Pro_
 
