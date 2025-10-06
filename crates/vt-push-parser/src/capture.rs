@@ -113,7 +113,7 @@ impl VTCaptureInternal {
 
                 // We've matched the entire terminator
                 *self = VTCaptureInternal::None;
-                return None;
+                None
             }
         }
     }
