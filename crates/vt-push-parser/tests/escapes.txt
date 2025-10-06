@@ -127,3 +127,5 @@ Hello<ESC>P:1;2;3|data<ESC>\World
 
 # ESC: Escape sequence with final c (RIS - Reset to Initial State)
 <ESC>c
+# ESC: Escape with private flag (not-spec compliant, but shows up in VT52 input events)
+<ESC>?y

@@ -533,3 +533,12 @@ DcsStart(, '1', '2', '3', '', |), data=<ESC><ESC>data
 Esc('', c)
 ```
 ---
+## ESC: Escape with private flag (not-spec compliant, but shows up in VT52 input events)
+```
+<ESC>?y
+```
+
+```
+Esc('', y)
+```
+---

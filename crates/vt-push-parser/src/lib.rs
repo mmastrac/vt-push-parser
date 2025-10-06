@@ -256,22 +256,52 @@ impl VTPushParser {
 
 /// Emit the EscInvalid event
 macro_rules! invalid {
-    ($self:ident .ints, $b:expr) => {
-        if $self.ints.len() == 1 {
-            VTEvent::EscInvalid(EscInvalid::Two($self.ints.data[0], $b))
+    ($self:ident .priv_prefix, $self_:ident .ints, $b:expr) => {
+        if let Some(p) = $self.priv_prefix {
+            if $self.ints.len() == 0 {
+                VTEvent::EscInvalid(EscInvalid::Two(p, $b))
+            } else if $self.ints.len() == 1 {
+                VTEvent::EscInvalid(EscInvalid::Three(p, $self.ints.data[0], $b))
+            } else {
+                VTEvent::EscInvalid(EscInvalid::Four(
+                    p,
+                    $self.ints.data[0],
+                    $self.ints.data[1],
+                    $b,
+                ))
+            }
         } else {
-            VTEvent::EscInvalid(EscInvalid::Three(
-                $self.ints.data[0],
-                $self.ints.data[1],
-                $b,
-            ))
+            if $self.ints.len() == 0 {
+                VTEvent::EscInvalid(EscInvalid::One($b))
+            } else if $self.ints.len() == 1 {
+                VTEvent::EscInvalid(EscInvalid::Two($self.ints.data[0], $b))
+            } else {
+                VTEvent::EscInvalid(EscInvalid::Three(
+                    $self.ints.data[0],
+                    $self.ints.data[1],
+                    $b,
+                ))
+            }
         }
     };
-    ($self:ident .ints) => {
-        if $self.ints.len() == 1 {
-            VTEvent::EscInvalid(EscInvalid::One($self.ints.data[0]))
+    ($self:ident .priv_prefix, $self_:ident .ints) => {
+        if let Some(p) = $self.priv_prefix {
+            if $self.ints.len() == 0 {
+                VTEvent::EscInvalid(EscInvalid::One(p))
+            } else if $self.ints.len() == 1 {
+                VTEvent::EscInvalid(EscInvalid::Two(p, $self.ints.data[0]))
+            } else {
+                VTEvent::EscInvalid(EscInvalid::Three(p, $self.ints.data[0], $self.ints.data[1]))
+            }
         } else {
-            VTEvent::EscInvalid(EscInvalid::Two($self.ints.data[0], $self.ints.data[1]))
+            if $self.ints.len() == 0 {
+                // I don't think this can happen
+                VTEvent::C0(0x1b)
+            } else if $self.ints.len() == 1 {
+                VTEvent::EscInvalid(EscInvalid::One($self.ints.data[0]))
+            } else {
+                VTEvent::EscInvalid(EscInvalid::Two($self.ints.data[0], $self.ints.data[1]))
+            }
         }
     };
     ($a:expr) => {
@@ -570,7 +600,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                 if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
                     None
                 } else {
-                    Some(invalid!(self.ints))
+                    Some(invalid!(self.priv_prefix, self.ints))
                 }
             }
             State::EscSs2 | State::EscSs3 => {
@@ -732,6 +762,11 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                 }
                 VTAction::None
             }
+            c if is_priv(c) => {
+                self.priv_prefix = Some(c);
+                self.st = EscInt;
+                VTAction::None
+            }
             CSI => {
                 if INTEREST & VT_PARSER_INTEREST_CSI == 0 {
                     self.st = CsiIgnore;
@@ -768,6 +803,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                 self.st = Ground;
                 VTAction::Event(VTEvent::Esc(Esc {
                     intermediates: self.ints,
+                    private: self.priv_prefix.take(),
                     final_byte: c,
                 }))
             }
@@ -794,7 +830,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                 if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
                     VTAction::None
                 } else {
-                    VTAction::Event(invalid!(self.ints, b))
+                    VTAction::Event(invalid!(self.priv_prefix, self.ints, b))
                 }
             }
             // NOTE: DEL should be ignored normally, but for better recovery,
@@ -804,7 +840,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                 if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
                     VTAction::None
                 } else {
-                    VTAction::Event(invalid!(self.ints, b))
+                    VTAction::Event(invalid!(self.priv_prefix, self.ints, b))
                 }
             }
             c if is_intermediate(c) => {
@@ -813,7 +849,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                     if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
                         VTAction::None
                     } else {
-                        VTAction::Event(invalid!(self.ints, b))
+                        VTAction::Event(invalid!(self.priv_prefix, self.ints, b))
                     }
                 } else {
                     VTAction::None
@@ -823,6 +859,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                 self.st = Ground;
                 VTAction::Event(VTEvent::Esc(Esc {
                     intermediates: self.ints,
+                    private: self.priv_prefix.take(),
                     final_byte: c,
                 }))
             }
@@ -833,7 +870,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                 if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
                     VTAction::None
                 } else {
-                    VTAction::Event(invalid!(self.ints))
+                    VTAction::Event(invalid!(self.priv_prefix, self.ints))
                 }
             }
             c => {
@@ -841,7 +878,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                 if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
                     VTAction::None
                 } else {
-                    VTAction::Event(invalid!(self.ints, c))
+                    VTAction::Event(invalid!(self.priv_prefix, self.ints, c))
                 }
             }
         }
@@ -1646,12 +1683,16 @@ mod tests {
             let mut parser = VTPushParser::<VT_PARSER_INTEREST_ALL>::new_with();
             parser.feed_with(test_bytes, &mut |event| {
                 let mut chunk = [0_u8; 3];
-                let b = event.encode(&mut chunk).unwrap();
+                let b = event.encode(&mut chunk).unwrap_or_else(|_| {
+                    panic!("Failed to encode event {test_bytes:X?} -> {event:?}")
+                });
                 bytes.extend_from_slice(&chunk[..b]);
             });
             if let Some(event) = parser.idle() {
                 let mut chunk = [0_u8; 3];
-                let b = event.encode(&mut chunk).unwrap();
+                let b = event.encode(&mut chunk).unwrap_or_else(|_| {
+                    panic!("Failed to encode event {test_bytes:X?} -> {event:?}")
+                });
                 bytes.extend_from_slice(&chunk[..b]);
             }
 

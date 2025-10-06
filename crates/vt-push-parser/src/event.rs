@@ -301,13 +301,14 @@ impl<'a> VTEvent<'a> {
         match self {
             Raw(s) => s.len(),
             C0(_) => 1,
-            Esc(esc) => esc.intermediates.len() + 2,
+            Esc(esc) => esc.intermediates.len() + 2 + esc.private.is_some() as usize,
             EscInvalid(esc_invalid) => {
                 use self::EscInvalid::*;
                 match esc_invalid {
                     One(..) => 2,
                     Two(..) => 3,
                     Three(..) => 4,
+                    Four(..) => 5,
                 }
             }
             Ss2(_) => 3,
@@ -373,6 +374,12 @@ impl<'a> VTEvent<'a> {
                         buf[2] = *b2;
                         buf[3] = *b3;
                     }
+                    Four(b1, b2, b3, b4) => {
+                        buf[1] = *b1;
+                        buf[2] = *b2;
+                        buf[3] = *b3;
+                        buf[4] = *b4;
+                    }
                 }
             }
             OscCancel | DcsCancel => {
@@ -393,6 +400,10 @@ impl<'a> VTEvent<'a> {
             }
             Esc(esc) => {
                 buf[0] = ESC;
+                if let Some(p) = esc.private {
+                    buf[1] = p;
+                    buf = &mut buf[1..];
+                }
                 buf[1..esc.intermediates.len() + 1]
                     .copy_from_slice(&esc.intermediates.data[..esc.intermediates.len()]);
                 buf[esc.intermediates.len() + 1] = esc.final_byte;
@@ -587,10 +598,7 @@ impl VTOwnedEvent {
         match self {
             VTOwnedEvent::Raw(s) => VTEvent::Raw(s),
             VTOwnedEvent::C0(b) => VTEvent::C0(*b),
-            VTOwnedEvent::Esc(esc) => VTEvent::Esc(Esc {
-                intermediates: esc.intermediates,
-                final_byte: esc.final_byte,
-            }),
+            VTOwnedEvent::Esc(esc) => VTEvent::Esc(*esc),
             VTOwnedEvent::EscInvalid(esc_invalid) => VTEvent::EscInvalid(*esc_invalid),
             VTOwnedEvent::Ss2(ss2) => VTEvent::Ss2(SS2 { char: ss2.char }),
             VTOwnedEvent::Ss3(ss3) => VTEvent::Ss3(SS3 { char: ss3.char }),
@@ -627,14 +635,16 @@ pub enum EscInvalid {
     One(u8),
     Two(u8, u8),
     Three(u8, u8, u8),
+    Four(u8, u8, u8, u8),
 }
 
 impl std::fmt::Debug for EscInvalid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EscInvalid::One(b) => write!(f, "EscInvalid({b:?})")?,
-            EscInvalid::Two(b1, b2) => write!(f, "EscInvalid({b1:?}, {b2:?})")?,
-            EscInvalid::Three(b1, b2, b3) => write!(f, "EscInvalid({b1:?}, {b2:?}, {b3:?})")?,
+            EscInvalid::One(b) => write!(f, "EscInvalid(1B {b:02X})")?,
+            EscInvalid::Two(b1, b2) => write!(f, "EscInvalid(1B {b1:02X} {b2:02X})")?,
+            EscInvalid::Three(b1, b2, b3) => write!(f, "EscInvalid(1B {b1:02X} {b2:02X} {b3:02X})")?,
+            EscInvalid::Four(b1, b2, b3, b4) => write!(f, "EscInvalid(1B {b1:02X} {b2:02X} {b3:02X} {b4:02X})")?,
         }
         Ok(())
     }
@@ -644,6 +654,7 @@ impl std::fmt::Debug for EscInvalid {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Esc {
     pub intermediates: VTIntermediate,
+    pub private: Option<u8>,
     pub final_byte: u8,
 }
 
