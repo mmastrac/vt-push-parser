@@ -105,11 +105,22 @@ pub fn decode_string(input: &str) -> Vec<u8> {
         if ch == '<' {
             // Collect characters until '>'
             let mut control_name = String::new();
-            while let Some(ch) = chars.next() {
+            let mut found_closing = false;
+            for ch in chars.by_ref() {
                 if ch == '>' {
+                    found_closing = true;
                     break;
                 }
                 control_name.push(ch);
+            }
+
+            // Check if it's a hex byte (2 hex digits)
+            if control_name.len() == 2
+                && control_name.chars().all(|c| c.is_ascii_hexdigit())
+                && let Ok(byte) = u8::from_str_radix(&control_name, 16)
+            {
+                result.push(byte);
+                continue;
             }
 
             // Parse the control name and convert to byte
@@ -123,7 +134,7 @@ pub fn decode_string(input: &str) -> Vec<u8> {
                 "ACK" => result.push(6),
                 "BEL" => result.push(7),
                 "BS" => result.push(8),
-                "TAB" => result.push(9),
+                "HT" | "TAB" => result.push(9),
                 "LF" => result.push(10),
                 "VT" => result.push(11),
                 "FF" => result.push(12),
@@ -153,7 +164,9 @@ pub fn decode_string(input: &str) -> Vec<u8> {
                     // If not a recognized control code, treat as literal text
                     result.push(b'<');
                     result.extend_from_slice(control_name.as_bytes());
-                    result.push(b'>');
+                    if found_closing {
+                        result.push(b'>');
+                    }
                 }
             }
         } else {
@@ -184,4 +197,54 @@ pub fn encode_string(bytes: &[u8]) -> String {
         }
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_decode_string_unclosed_control_sequence() {
+        // Test that unclosed control sequences don't add extraneous '>'
+        let decoded = decode_string("<ESC>[<u");
+        assert_eq!(decoded, vec![0x1B, 0x5B, 0x3C, 0x75]);
+    }
+
+    #[test]
+    fn test_decode_string_closed_control_sequence() {
+        // Test that closed control sequences work correctly
+        let decoded = decode_string("<ESC>[>u");
+        assert_eq!(decoded, vec![0x1B, 0x5B, 0x3E, 0x75]);
+    }
+
+    #[test]
+    fn test_decode_string_unrecognized_closed() {
+        // Test unrecognized but closed control sequence
+        let decoded = decode_string("<foo>");
+        assert_eq!(decoded, vec![0x3C, 0x66, 0x6F, 0x6F, 0x3E]);
+    }
+
+    #[test]
+    fn test_decode_string_unrecognized_unclosed() {
+        // Test unrecognized and unclosed control sequence
+        let decoded = decode_string("<bar");
+        assert_eq!(decoded, vec![0x3C, 0x62, 0x61, 0x72]);
+    }
+
+    #[test]
+    fn test_decode_string_recognized_control() {
+        // Test recognized control codes
+        let decoded = decode_string("<ESC>");
+        assert_eq!(decoded, vec![0x1B]);
+
+        let decoded = decode_string("<CR><LF>");
+        assert_eq!(decoded, vec![0x0D, 0x0A]);
+    }
+
+    #[test]
+    fn test_decode_string_hex_bytes() {
+        // Test hex byte encoding
+        let decoded = decode_string("<1B>[A");
+        assert_eq!(decoded, vec![0x1B, 0x5B, 0x41]);
+    }
 }
