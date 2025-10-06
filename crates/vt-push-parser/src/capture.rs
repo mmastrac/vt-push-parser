@@ -79,27 +79,41 @@ impl VTCaptureInternal {
                     None
                 }
             }
-            VTCaptureInternal::Terminator(terminator, _found) => {
-                // For now, use the simple approach that works
-                // TODO: Implement proper partial matching across calls
-                if let Some(pos) = input
-                    .windows(terminator.len())
-                    .position(|window| window == *terminator)
-                {
-                    let (capture, rest) = input.split_at(pos);
-                    *input = &rest[terminator.len()..]; // Skip the terminator
-                    *self = VTCaptureInternal::None;
-                    Some(capture)
-                } else {
-                    // No complete terminator found, emit all input and keep looking
-                    if !input.is_empty() {
-                        let (capture, rest) = input.split_at(input.len());
-                        *input = rest;
-                        Some(capture)
+            VTCaptureInternal::Terminator(terminator, found) => {
+                // Ground state
+                if *found == 0 {
+                    if let Some(position) = input.iter().position(|&b| b == terminator[0]) {
+                        // Advance to first match position
+                        *found = 1;
+                        let unmatched = &input[..position];
+                        *input = &input[position + 1..];
+                        return Some(unmatched);
                     } else {
-                        None
+                        let unmatched = *input;
+                        *input = &[];
+                        return Some(unmatched);
                     }
                 }
+
+                // We've already found part of the terminator, so we can continue
+                while *found < terminator.len() {
+                    if input.is_empty() {
+                        return None;
+                    }
+
+                    if input[0] == terminator[*found] {
+                        *found += 1;
+                        *input = &input[1..];
+                    } else {
+                        // Failed a match, so return the part of the terminator we already matched
+                        let old_found = std::mem::take(found);
+                        return Some(&terminator[..old_found]);
+                    }
+                }
+
+                // We've matched the entire terminator
+                *self = VTCaptureInternal::None;
+                return None;
             }
         }
     }
@@ -346,5 +360,43 @@ Capture([112, 97, 114, 116, 27, 91, 50, 48, 49, 105, 97, 108])
 CaptureEnd
 VTEvent(Raw('end'))"#
         );
+    }
+
+    #[test]
+    fn test_capture_terminator_partial_match_single_byte() {
+        let input = b"start\x1b[200~part\x1b[201ial\x1b[201~end";
+
+        for chunk_size in 1..5 {
+            let (captured, output) = capture_chunk_size(input, chunk_size);
+            assert_eq!(captured, b"part\x1b[201ial", "{output}",);
+        }
+    }
+
+    fn capture_chunk_size(input: &'static [u8; 32], chunk_size: usize) -> (Vec<u8>, String) {
+        let mut output = String::new();
+        let mut parser = VTCapturePushParser::new();
+        let mut captured = Vec::new();
+        for chunk in input.chunks(chunk_size) {
+            parser.feed_with(chunk, &mut |event| {
+                output.push_str(&format!("{event:?}\n"));
+                match event {
+                    VTCaptureEvent::Capture(data) => {
+                        captured.extend_from_slice(data);
+                        VTInputCapture::None
+                    }
+                    VTCaptureEvent::VTEvent(VTEvent::Csi(csi)) => {
+                        if csi.final_byte == b'~'
+                            && csi.params.try_parse::<usize>(0).unwrap_or(0) == 200
+                        {
+                            VTInputCapture::Terminator(b"\x1b[201~")
+                        } else {
+                            VTInputCapture::None
+                        }
+                    }
+                    _ => VTInputCapture::None,
+                }
+            });
+        }
+        (captured, output)
     }
 }
