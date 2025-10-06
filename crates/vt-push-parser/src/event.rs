@@ -140,6 +140,8 @@ impl std::fmt::Debug for VTIntermediate {
 pub(crate) type Param = SmallVec<[u8; 32]>;
 pub(crate) type Params = SmallVec<[Param; 8]>;
 
+static EMPTY_PARAMS: Params = Params::new_const();
+
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[repr(transparent)]
@@ -164,6 +166,12 @@ impl<'a> IntoIterator for &ParamBuf<'a> {
 }
 
 impl<'a> ParamBuf<'a> {
+    pub const fn empty() -> Self {
+        ParamBuf {
+            params: &EMPTY_PARAMS,
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.params.len()
     }
@@ -202,6 +210,7 @@ impl<'a> ParamBuf<'a> {
 }
 
 /// A view into a [`Param`] that contains only numeric parameters.
+#[derive(Debug, Copy, Clone, Default)]
 pub struct NumericParam<'a> {
     pub(crate) param: &'a [u8],
 }
@@ -227,6 +236,7 @@ impl<'a> IntoIterator for NumericParam<'a> {
 ///
 /// Each parameter may contain zero or more numeric values, separated by colons.
 /// Empty parameters are interpreted as `None`.
+#[derive(Debug, Copy, Clone)]
 pub struct NumericParamBuf<'a> {
     pub(crate) params: &'a Params,
 }
@@ -238,6 +248,14 @@ impl<'a> IntoIterator for NumericParamBuf<'a> {
         self.params.iter().map(|p| NumericParam {
             param: p.as_slice(),
         })
+    }
+}
+
+impl<'a> NumericParamBuf<'a> {
+    pub const fn empty() -> Self {
+        NumericParamBuf {
+            params: &EMPTY_PARAMS,
+        }
     }
 }
 
