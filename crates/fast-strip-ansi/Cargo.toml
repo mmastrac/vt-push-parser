@@ -1,6 +1,6 @@
 [package]
 name = "fast-strip-ansi"
-version = "0.6.0"
+version = "0.7.0"
 description = "A performance-optimized, low-allocation ANSI escape sequence stripper"
 readme = "README.md"
 
