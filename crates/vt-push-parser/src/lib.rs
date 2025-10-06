@@ -246,7 +246,6 @@ impl VTPushParser {
     pub fn decode_buffer<'a>(input: &'a [u8], mut cb: impl for<'b> FnMut(VTEvent<'b>)) {
         let mut parser = VTPushParser::new();
         parser.feed_with(input, &mut cb);
-        parser.finish(&mut cb);
     }
 
     pub const fn new_with_interest<const INTEREST: u8>() -> VTPushParser<INTEREST> {
@@ -1355,6 +1354,8 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
 
 #[cfg(test)]
 mod tests {
+    use crate::event::VTOwnedEvent;
+
     use super::*;
     use pretty_assertions::assert_eq;
 
@@ -1408,105 +1409,85 @@ mod tests {
     }
 
     #[test]
-    fn test_finish_method() {
-        let mut parser = VTPushParser::new();
-        let mut result = String::new();
-        let mut callback = |vt_input: VTEvent<'_>| {
-            result.push_str(&format!("{vt_input:?}\n"));
-        };
+    fn test_dcs_payload_passthrough() {
+        // Test cases for DCS payload passthrough behavior
+        // Notes: body must be passed through verbatim.
+        // - ESC '\' (ST) ends the string.
+        // - ESC ESC stays as two bytes in the body.
+        // - ESC X (X!='\') is data: both ESC and the following byte are payload.
+        // - BEL (0x07) is data in DCS (not a terminator).
 
-        // Start an incomplete sequence
-        parser.feed_with(b"\x1b[1;2;3", &mut callback);
+        let dcs_cases: &[(&[u8], &str)] = &[
+            // 1) Minimal: embedded CSI SGR truecolor (colon params)
+            (b"\x1bPq\x1b[38:2:12:34:56m\x1b\\", "<ESC>[38:2:12:34:56m"),
+            // 2) Mixed payload: CSI + literal text
+            (b"\x1bPq\x1b[48:2:0:0:0m;xyz\x1b\\", "<ESC>[48:2:0:0:0m;xyz"),
+            // 3) DECRQSS-style reply payload (DCS 1$r ... ST) containing colon-CSI
+            (
+                b"\x1bP1$r\x1b[38:2:10:20:30;58:2::200:100:0m\x1b\\",
+                "<ESC>[38:2:10:20:30;58:2::200:100:0m",
+            ),
+            // 4) ESC ESC and ESC X inside body (all data)
+            (
+                b"\x1bPqABC\x1b\x1bDEF\x1bXG\x1b\\",
+                "ABC<ESC><ESC>DEF<ESC>XG",
+            ),
+            // 5) BEL in body (data, not a terminator)
+            (b"\x1bPqDATA\x07MORE\x1b\\", "DATA<BEL>MORE"),
+            // 6) iTerm2-style header (!|) with embedded CSI 256-color
+            (b"\x1bP!|\x1b[38:5:208m\x1b\\", "<ESC>[38:5:208m"),
+            // 7) Private prefix + final '|' (>|) with plain text payload
+            (b"\x1bP>|Hello world\x1b\\", "Hello world"),
+            // 8) Multiple embedded CSIs back-to-back
+            (
+                b"\x1bPq\x1b[38:2:1:2:3m\x1b[48:5:17m\x1b\\",
+                "<ESC>[38:2:1:2:3m<ESC>[48:5:17m",
+            ),
+            // 9) Long colon param with leading zeros
+            (
+                b"\x1bPq\x1b[58:2::000:007:042m\x1b\\",
+                "<ESC>[58:2::000:007:042m",
+            ),
+        ];
 
-        // Finish should flush any pending raw data
-        parser.finish(&mut callback);
+        for (input, expected_body) in dcs_cases {
+            let events = collect_owned_events(input);
 
-        assert_eq!(result.trim(), "");
+            // Find DcsData events and concatenate their payloads
+            let mut actual_body = Vec::new();
+            for event in &events {
+                match event {
+                    VTOwnedEvent::DcsData(data) | VTOwnedEvent::DcsEnd(data) => {
+                        actual_body.extend(data);
+                    }
+                    _ => {}
+                }
+            }
+
+            let actual_body = String::from_utf8(actual_body).unwrap();
+            let actual_body = actual_body
+                .replace("\x1b", "<ESC>")
+                .replace("\x07", "<BEL>");
+
+            assert_eq!(
+                actual_body, *expected_body,
+                "DCS payload mismatch for input {:?}. Full events: {:#?}",
+                input, events
+            );
+        }
     }
-
-    // #[test]
-    // fn test_dcs_payload_passthrough() {
-    //     // Test cases for DCS payload passthrough behavior
-    //     // Notes: body must be passed through verbatim.
-    //     // - ESC '\' (ST) ends the string.
-    //     // - ESC ESC stays as two bytes in the body.
-    //     // - ESC X (X!='\') is data: both ESC and the following byte are payload.
-    //     // - BEL (0x07) is data in DCS (not a terminator).
-
-    //     let dcs_cases: &[(&[u8], &str)] = &[
-    //         // 1) Minimal: embedded CSI SGR truecolor (colon params)
-    //         (b"\x1bPq\x1b[38:2:12:34:56m\x1b\\", "<ESC>[38:2:12:34:56m"),
-    //         // 2) Mixed payload: CSI + literal text
-    //         (b"\x1bPq\x1b[48:2:0:0:0m;xyz\x1b\\", "<ESC>[48:2:0:0:0m;xyz"),
-    //         // 3) DECRQSS-style reply payload (DCS 1$r ... ST) containing colon-CSI
-    //         (
-    //             b"\x1bP1$r\x1b[38:2:10:20:30;58:2::200:100:0m\x1b\\",
-    //             "<ESC>[38:2:10:20:30;58:2::200:100:0m",
-    //         ),
-    //         // 4) ESC ESC and ESC X inside body (all data)
-    //         (
-    //             b"\x1bPqABC\x1b\x1bDEF\x1bXG\x1b\\",
-    //             "ABC<ESC><ESC>DEF<ESC>XG",
-    //         ),
-    //         // 5) BEL in body (data, not a terminator)
-    //         (b"\x1bPqDATA\x07MORE\x1b\\", "DATA<BEL>MORE"),
-    //         // 6) iTerm2-style header (!|) with embedded CSI 256-color
-    //         (b"\x1bP!|\x1b[38:5:208m\x1b\\", "<ESC>[38:5:208m"),
-    //         // 7) Private prefix + final '|' (>|) with plain text payload
-    //         (b"\x1bP>|Hello world\x1b\\", "Hello world"),
-    //         // 8) Multiple embedded CSIs back-to-back
-    //         (
-    //             b"\x1bPq\x1b[38:2:1:2:3m\x1b[48:5:17m\x1b\\",
-    //             "<ESC>[38:2:1:2:3m<ESC>[48:5:17m",
-    //         ),
-    //         // 9) Long colon param with leading zeros
-    //         (
-    //             b"\x1bPq\x1b[58:2::000:007:042m\x1b\\",
-    //             "<ESC>[58:2::000:007:042m",
-    //         ),
-    //     ];
-
-    //     for (input, expected_body) in dcs_cases {
-    //         let events = collect_events(input);
-
-    //         // Find DcsData events and concatenate their payloads
-    //         let mut actual_body = String::new();
-    //         for event in &events {
-    //             if let Some(data_part) = event
-    //                 .strip_prefix("DcsData('")
-    //                 .and_then(|s| s.strip_suffix("')"))
-    //             {
-    //                 actual_body
-    //                     .push_str(&data_part.replace("\x1b", "<ESC>").replace("\x07", "<BEL>"));
-    //             }
-    //         }
-
-    //         assert_eq!(
-    //             actual_body, *expected_body,
-    //             "DCS payload mismatch for input {:?}. Full events: {:#?}",
-    //             input, events
-    //         );
-
-    //         // Also verify we get proper DcsStart and DcsEnd events
-    //         assert!(
-    //             events.iter().any(|e| e.starts_with("DcsStart")),
-    //             "Missing DcsStart for input {:?}. Events: {:#?}",
-    //             input,
-    //             events
-    //         );
-    //         assert!(
-    //             events.iter().any(|e| e == "DcsEnd"),
-    //             "Missing DcsEnd for input {:?}. Events: {:#?}",
-    //             input,
-    //             events
-    //         );
-    //     }
-    // }
 
     fn collect_events(input: &[u8]) -> Vec<String> {
         let mut out = Vec::new();
         let mut p = VTPushParser::new();
         p.feed_with(input, &mut |ev| out.push(format!("{ev:?}")));
+        out
+    }
+
+    fn collect_owned_events(input: &[u8]) -> Vec<VTOwnedEvent> {
+        let mut out = Vec::new();
+        let mut p = VTPushParser::new();
+        p.feed_with(input, &mut |ev| out.push(ev.to_owned()));
         out
     }
 
