@@ -215,6 +215,42 @@ pub struct NumericParam<'a> {
     pub(crate) param: &'a [u8],
 }
 
+impl<'a> NumericParam<'a> {
+    /// Try to parse the parameter as a single numeric value.
+    pub fn sole(&self) -> Option<u16> {
+        if !self.param.is_empty() && !self.param.contains(&b':') {
+            if let Some(s) = std::str::from_utf8(self.param).ok() {
+                if let Ok(n) = s.parse::<u16>() {
+                    Some(n)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Try to write the parameters to the given buffer, returning the written
+    /// slice if successful. If any parameters are not a single-numeric value,
+    /// writes a zero in that position.
+    ///
+    /// If the slice is not long enough, returns an error with the required
+    /// length.
+    pub fn try_write<'b>(&self, buf: &'b mut [u16]) -> Result<&'b [u16], usize> {
+        let len = self.param.into_iter().filter(|p| **p == b':').count() + 1;
+        if buf.len() < len {
+            return Err(buf.len());
+        }
+        for (i, param) in self.into_iter().enumerate() {
+            buf[i] = param.unwrap_or(0);
+        }
+        Ok(&buf[..len])
+    }
+}
+
 impl<'a> IntoIterator for NumericParam<'a> {
     type Item = Option<u16>;
     type IntoIter = Map<std::slice::Split<'a, u8, fn(&u8) -> bool>, fn(&'a [u8]) -> Option<u16>>;
@@ -256,6 +292,29 @@ impl<'a> NumericParamBuf<'a> {
         NumericParamBuf {
             params: &EMPTY_PARAMS,
         }
+    }
+
+    /// Try to write the parameters to the given buffer, returning the written
+    /// slice if successful. If any parameters are not a single-numeric value,
+    /// writes a zero in that position.
+    ///
+    /// If the slice is not long enough, returns an error with the required
+    /// length.
+    pub fn try_write<'b>(&self, buf: &'b mut [u16]) -> Result<&'b [u16], usize> {
+        let len = self.params.len();
+        if buf.len() < len {
+            return Err(buf.len());
+        }
+        for (i, param) in self.into_iter().enumerate() {
+            buf[i] = param.sole().unwrap_or(0);
+        }
+        Ok(&buf[..len])
+    }
+
+    pub fn get(&self, index: usize) -> Option<NumericParam<'a>> {
+        self.params.get(index).map(|p| NumericParam {
+            param: p.as_slice(),
+        })
     }
 }
 
@@ -913,6 +972,21 @@ mod test {
         assert_eq!(
             numeric_param_buf.into_iter().flatten().collect::<Vec<_>>(),
             vec![Some(1), Some(2), Some(3), Some(4), None, None]
+        );
+
+        assert_eq!(
+            numeric_param_buf
+                .try_write(&mut [0, 0, 0, 0, 0, 0])
+                .unwrap(),
+            &[0, 4, 0]
+        );
+        assert_eq!(
+            numeric_param_buf
+                .get(0)
+                .unwrap()
+                .try_write(&mut [0, 0, 0, 0, 0, 0])
+                .unwrap(),
+            &[1, 2, 3]
         );
     }
 }

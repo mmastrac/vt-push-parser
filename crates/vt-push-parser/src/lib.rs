@@ -517,22 +517,20 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                     emit!(state, i, cb, true, used_bel);
                 }
                 VTAction::Buffer(emit) | VTAction::Hold(emit) => {
-                    if state.current_emit.is_none() {
-                        if let Some(h) = held_byte.take() {
-                            if match emit {
-                                VTEmit::Ground => cb(VTEvent::Raw(&[h])),
-                                VTEmit::Dcs => cb(VTEvent::DcsData(&[h])),
-                                VTEmit::Osc => cb(VTEvent::OscData(&[h])),
-                            }
-                            .abort()
-                            {
-                                if matches!(action, VTAction::Hold(_)) {
-                                    self.held_byte = Some(0x1b);
-                                    return 1;
-                                }
-                                return 0;
-                            }
+                    if state.current_emit.is_none()
+                        && let Some(h) = held_byte.take()
+                        && match emit {
+                            VTEmit::Ground => cb(VTEvent::Raw(&[h])),
+                            VTEmit::Dcs => cb(VTEvent::DcsData(&[h])),
+                            VTEmit::Osc => cb(VTEvent::OscData(&[h])),
                         }
+                        .abort()
+                    {
+                        if matches!(action, VTAction::Hold(_)) {
+                            self.held_byte = Some(0x1b);
+                            return 1;
+                        }
+                        return 0;
                     }
 
                     debug_assert!(state.current_emit.is_none() || state.current_emit == Some(emit));
