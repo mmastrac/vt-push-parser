@@ -116,15 +116,6 @@ pub fn decode_string(input: &str) -> Vec<u8> {
                 control_name.push(ch);
             }
 
-            // Check if it's a hex byte (2 hex digits)
-            if control_name.len() == 2
-                && control_name.chars().all(|c| c.is_ascii_hexdigit())
-                && let Ok(byte) = u8::from_str_radix(&control_name, 16)
-            {
-                result.push(byte);
-                continue;
-            }
-
             // Parse the control name and convert to byte
             match control_name.to_uppercase().as_str() {
                 "NUL" => result.push(0),
@@ -163,6 +154,15 @@ pub fn decode_string(input: &str) -> Vec<u8> {
                 "SP" => result.push(32),
                 "DEL" => result.push(127),
                 _ => {
+                    // If it's a hex byte (2 hex digits), convert to byte
+                    if control_name.len() == 2
+                        && control_name.chars().all(|c| c.is_ascii_hexdigit())
+                        && let Ok(byte) = u8::from_str_radix(&control_name, 16)
+                    {
+                        result.push(byte);
+                        continue;
+                    }
+
                     // If not a recognized control code, treat as literal text
                     result.push(b'<');
                     result.extend_from_slice(control_name.as_bytes());
