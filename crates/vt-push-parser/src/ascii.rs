@@ -1,3 +1,5 @@
+//! ASCII control codes.
+
 macro_rules! ascii_control {
     ($(($variant:ident, $value:expr)),* $(,)?) => {
         /// ASCII control codes.

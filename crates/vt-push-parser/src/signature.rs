@@ -1,3 +1,5 @@
+//! Escape sequence signature matching.
+
 use std::ops::Range;
 
 use crate::event::{VTEvent, VTIntermediate};
@@ -34,6 +36,13 @@ impl VTEscapeSignature {
     pub const fn with_params_exact(self, param_count: u8) -> Self {
         Self {
             param_count: param_count..param_count + 1,
+            ..self
+        }
+    }
+
+    pub const fn with_params_count(self, param_count: Range<u8>) -> Self {
+        Self {
+            param_count,
             ..self
         }
     }

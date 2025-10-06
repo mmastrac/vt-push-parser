@@ -1,3 +1,4 @@
+//! Event types.
 use std::iter::Map;
 
 use smallvec::SmallVec;
@@ -194,6 +195,8 @@ impl<'a> ParamBuf<'a> {
     }
 }
 
+/// A union of all possible events that can be emitted by the parser, with
+/// borrowed data.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[derive(Clone, PartialEq, Eq)]
 pub enum VTEvent<'a> {
@@ -551,6 +554,8 @@ impl ParamBufOwned {
     }
 }
 
+/// A union of all possible events that can be emitted by the parser, with owned
+/// data.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[derive(Clone, PartialEq, Eq)]
 pub enum VTOwnedEvent {

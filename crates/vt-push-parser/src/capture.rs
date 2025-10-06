@@ -1,4 +1,6 @@
-use crate::{VTEvent, VTPushParser};
+//! Raw-input-capturing push parser.
+
+use crate::{VT_PARSER_INTEREST_DEFAULT, VTEvent, VTPushParser};
 
 /// The type of capture mode to use after this event has been emitted.
 ///
@@ -108,15 +110,25 @@ impl VTCaptureInternal {
 ///
 /// This functions in the same way as [`VTPushParser`], but emits
 /// [`VTCaptureEvent`]s instead of [`VTEvent`]s.
-pub struct VTCapturePushParser {
-    parser: VTPushParser,
+pub struct VTCapturePushParser<const INTEREST: u8 = VT_PARSER_INTEREST_DEFAULT> {
+    parser: VTPushParser<INTEREST>,
     capture: VTCaptureInternal,
 }
 
 impl VTCapturePushParser {
-    pub fn new() -> Self {
+    pub const fn new() -> VTCapturePushParser {
+        VTCapturePushParser::new_with_interest::<VT_PARSER_INTEREST_DEFAULT>()
+    }
+
+    pub const fn new_with_interest<const INTEREST: u8>() -> VTCapturePushParser<INTEREST> {
+        VTCapturePushParser::new_with()
+    }
+}
+
+impl<const INTEREST: u8> VTCapturePushParser<INTEREST> {
+    const fn new_with() -> Self {
         Self {
-            parser: VTPushParser::new(),
+            parser: VTPushParser::new_with(),
             capture: VTCaptureInternal::None,
         }
     }

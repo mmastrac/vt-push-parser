@@ -1,7 +1,9 @@
+//! Iterator wrapper around [`VTPushParser`].
+
 use crate::{VTPushParser, event::VTOwnedEvent};
 
-/// A convenience wrapper around `VTPushParser` that implements `Iterator` for
-/// any `Iterator` of `AsRef<[u8]>`.
+/// A convenience wrapper around [`VTPushParser`] that implements [`Iterator`]
+/// for any `Iterator` of `AsRef<[u8]>`.
 ///
 /// _PERFORMANCE NOTE_: This will allocate significantly more than using the
 /// parser directly, but may be more convenient for some use cases.

@@ -1,3 +1,42 @@
+//! A streaming push parser for the VT/xterm protocol.
+//!
+//! Use [`VTPushParser::feed_with`] to feed bytes into the parser, handling the
+//! [`VTEvent`]s as they are emitted.
+//!
+//! ```rust
+//! use vt_push_parser::VTPushParser;
+//!
+//! let mut parser = VTPushParser::new();
+//! let mut output = String::new();
+//! parser.feed_with(b"\x1b[32mHello, world!\x1b[0m", &mut |event| {
+//!     output.push_str(&format!("{:?}", event));
+//! });
+//! assert_eq!(output, "Csi(, '32', '', 'm')Raw('Hello, world!')Csi(, '0', '', 'm')");
+//! ```
+//!
+//! ## Interest
+//!
+//! The parser can be configured to only emit certain types of events by setting
+//! the `INTEREST` parameter. Other event types will be parsed and discarded.
+//!
+//! For example, to only emit CSI (and Raw) events:
+//!
+//! ```rust
+//! use vt_push_parser::{VTPushParser, VT_PARSER_INTEREST_CSI};
+//!
+//! let mut parser = VTPushParser::new_with_interest::<VT_PARSER_INTEREST_CSI>();
+//! ```
+//!
+//! ## Input parsing
+//!
+//! This crate is designed to be used for parsing terminal output, but it can
+//! also be used for parsing input. Input is not always well-formed, however and
+//! may contain mode-switching escapes that require the parser to turn off its
+//! normal parsing behaviours (ie: bracketed-paste mode, xterm mouse events,
+//! etc).
+//!
+//! The [`capture::VTCapturePushParser`] is useful for parsing input that may
+//! work in this way.
 pub mod ascii;
 pub mod capture;
 pub mod event;
@@ -23,9 +62,6 @@ const APC: u8 = b'_';
 const PM: u8 = b'^';
 const SOS: u8 = b'X';
 const ST_FINAL: u8 = b'\\';
-
-// Re-export the main types for backward compatibility
-pub use signature::VTEscapeSignature;
 
 use crate::event::{Param, ParamBuf, Params};
 
@@ -135,6 +171,7 @@ enum State {
     SpaEsc,
 }
 
+/// No events from parser (ie, only emits [`VTEvent::Raw`] events)
 pub const VT_PARSER_INTEREST_NONE: u8 = 0;
 /// Request CSI events from parser.
 pub const VT_PARSER_INTEREST_CSI: u8 = 1 << 0;
@@ -179,6 +216,10 @@ impl MaybeAbortable for () {
     }
 }
 
+/// A push parser for the VT/xterm protocol.
+///
+/// The parser can be configured to only emit certain types of events by setting
+/// the `INTEREST` parameter.
 pub struct VTPushParser<const INTEREST: u8 = VT_PARSER_INTEREST_DEFAULT> {
     st: State,
 
