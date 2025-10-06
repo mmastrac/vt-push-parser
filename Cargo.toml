@@ -9,4 +9,4 @@ license = "Apache-2.0 OR MIT"
 repository = "https://github.com/mmastrac/vt-push-parser"
 
 [workspace.dependencies]
-vt-push-parser = { path = "crates/vt-push-parser", version = "0.7.0" }
+vt-push-parser = { path = "crates/vt-push-parser", version = "0.8.0" }
