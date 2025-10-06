@@ -10,8 +10,8 @@ use vt_push_parser::{VT_PARSER_INTEREST_NONE, VTPushParser};
 pub fn strip_ansi_string(s: &str) -> Cow<str> {
     let mut output = Cow::Borrowed(s);
     let mut parser = VTPushParser::new_with_interest::<VT_PARSER_INTEREST_NONE>();
-    parser.feed_with(s.as_bytes(), &mut |event| match event {
-        VTEvent::Raw(text) => {
+    parser.feed_with(s.as_bytes(), &mut |event| {
+        if let VTEvent::Raw(text) = event {
             if text.len() == s.len() {
                 return;
             }
@@ -27,7 +27,6 @@ pub fn strip_ansi_string(s: &str) -> Cow<str> {
             };
             output.push_str(String::from_utf8_lossy(text).as_ref());
         }
-        _ => {}
     });
     output
 }
@@ -37,8 +36,8 @@ pub fn strip_ansi_string(s: &str) -> Cow<str> {
 pub fn strip_ansi_bytes(s: &[u8]) -> Cow<[u8]> {
     let mut output = Cow::Borrowed(s);
     let mut parser = VTPushParser::new_with_interest::<VT_PARSER_INTEREST_NONE>();
-    parser.feed_with(s, &mut |event| match event {
-        VTEvent::Raw(text) => {
+    parser.feed_with(s, &mut |event| {
+        if let VTEvent::Raw(text) = event {
             if text.len() == s.len() {
                 return;
             }
@@ -54,7 +53,6 @@ pub fn strip_ansi_bytes(s: &[u8]) -> Cow<[u8]> {
             };
             output.extend_from_slice(text);
         }
-        _ => {}
     });
     output
 }
@@ -63,9 +61,10 @@ pub fn strip_ansi_bytes(s: &[u8]) -> Cow<[u8]> {
 /// raw text chunk.
 pub fn strip_ansi_bytes_callback(s: &[u8], mut cb: impl FnMut(&[u8])) {
     let mut parser = VTPushParser::new_with_interest::<VT_PARSER_INTEREST_NONE>();
-    parser.feed_with(s, &mut |event| match event {
-        VTEvent::Raw(text) => cb(text),
-        _ => {}
+    parser.feed_with(s, &mut |event| {
+        if let VTEvent::Raw(text) = event {
+            cb(text)
+        }
     });
 }
 
@@ -73,6 +72,12 @@ pub fn strip_ansi_bytes_callback(s: &[u8], mut cb: impl FnMut(&[u8])) {
 /// and yields text chunks to a callback.
 pub struct StreamingStripper {
     parser: VTPushParser<VT_PARSER_INTEREST_NONE>,
+}
+
+impl Default for StreamingStripper {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl StreamingStripper {
@@ -85,9 +90,10 @@ impl StreamingStripper {
     /// Feed a chunk of data to the stripper. The callback will be called for
     /// each raw text chunk.
     pub fn feed(&mut self, s: &[u8], cb: &mut impl FnMut(&[u8])) {
-        self.parser.feed_with(s, &mut |event| match event {
-            VTEvent::Raw(text) => cb(text),
-            _ => {}
+        self.parser.feed_with(s, &mut |event| {
+            if let VTEvent::Raw(text) = event {
+                cb(text)
+            }
         });
     }
 }

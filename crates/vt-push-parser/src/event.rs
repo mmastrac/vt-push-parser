@@ -13,9 +13,9 @@ fn fmt_utf8_bytes_with_ascii_control(
     for chunk in bytes.utf8_chunks() {
         for c in chunk.valid().chars() {
             if let Ok(c) = AsciiControl::try_from(c) {
-                write!(f, "{}", c)?;
+                write!(f, "{c}")?;
             } else {
-                write!(f, "{}", c)?;
+                write!(f, "{c}")?;
             }
         }
         if !chunk.invalid().is_empty() {
@@ -93,7 +93,7 @@ impl VTIntermediate {
 
     #[must_use]
     pub fn push(&mut self, c: u8) -> bool {
-        if c < 0x20 || c > 0x2F {
+        if !(0x20..=0x2F).contains(&c) {
             return false;
         }
 
@@ -155,7 +155,7 @@ impl<'a> IntoIterator for ParamBuf<'a> {
     }
 }
 
-impl<'b, 'a> IntoIterator for &'b ParamBuf<'a> {
+impl<'a> IntoIterator for &ParamBuf<'a> {
     type Item = &'a [u8];
     type IntoIter = Map<std::slice::Iter<'a, Param>, fn(&Param) -> &[u8]>;
     fn into_iter(self) -> Self::IntoIter {
@@ -186,7 +186,7 @@ impl<'a> ParamBuf<'a> {
 
     pub fn to_owned(&self) -> ParamBufOwned {
         ParamBufOwned {
-            params: self.params.iter().map(|p| p.clone()).collect(),
+            params: self.params.iter().cloned().collect(),
         }
     }
 
@@ -249,7 +249,7 @@ impl<'a> std::fmt::Debug for VTEvent<'a> {
                 Ok(())
             }
             EscInvalid(esc_invalid) => esc_invalid.fmt(f),
-            C0(b) => write!(f, "C0({:02x})", b),
+            C0(b) => write!(f, "C0({b:02x})"),
             Esc(esc) => esc.fmt(f),
             Ss2(ss2) => ss2.fmt(f),
             Ss3(ss3) => ss3.fmt(f),
@@ -288,7 +288,7 @@ impl<'a> VTEvent<'a> {
             VTEvent::Csi(csi) => Some(CSI {
                 private: csi.private,
                 params: csi.params,
-                intermediates: csi.intermediates.clone(),
+                intermediates: csi.intermediates,
                 final_byte: csi.final_byte,
             }),
             _ => None,
@@ -297,7 +297,8 @@ impl<'a> VTEvent<'a> {
 
     pub fn byte_len(&self) -> usize {
         use VTEvent::*;
-        let len = match self {
+
+        match self {
             Raw(s) => s.len(),
             C0(_) => 1,
             Esc(esc) => esc.intermediates.len() + 2,
@@ -336,8 +337,7 @@ impl<'a> VTEvent<'a> {
                 }
             }
             OscCancel => 1,
-        };
-        len
+        }
     }
 
     /// Encode the event into the provided buffer, returning the number of bytes
@@ -481,13 +481,13 @@ impl<'a> VTEvent<'a> {
             Csi(csi) => VTOwnedEvent::Csi(CSIOwned {
                 private: csi.private,
                 params: csi.params.to_owned(),
-                intermediates: csi.intermediates.clone(),
+                intermediates: csi.intermediates,
                 final_byte: csi.final_byte,
             }),
             DcsStart(dcs_start) => VTOwnedEvent::DcsStart(DCSOwned {
                 private: dcs_start.private,
                 params: dcs_start.params.to_owned(),
-                intermediates: dcs_start.intermediates.clone(),
+                intermediates: dcs_start.intermediates,
                 final_byte: dcs_start.final_byte,
             }),
             DcsData(s) => VTOwnedEvent::DcsData(s.to_vec()),
@@ -588,7 +588,7 @@ impl VTOwnedEvent {
             VTOwnedEvent::Raw(s) => VTEvent::Raw(s),
             VTOwnedEvent::C0(b) => VTEvent::C0(*b),
             VTOwnedEvent::Esc(esc) => VTEvent::Esc(Esc {
-                intermediates: esc.intermediates.clone(),
+                intermediates: esc.intermediates,
                 final_byte: esc.final_byte,
             }),
             VTOwnedEvent::EscInvalid(esc_invalid) => VTEvent::EscInvalid(*esc_invalid),
@@ -603,7 +603,7 @@ impl VTOwnedEvent {
             VTOwnedEvent::DcsStart(dcs_start) => VTEvent::DcsStart(DCS {
                 private: dcs_start.private,
                 params: dcs_start.params.borrow(),
-                intermediates: dcs_start.intermediates.clone(),
+                intermediates: dcs_start.intermediates,
                 final_byte: dcs_start.final_byte,
             }),
             VTOwnedEvent::DcsData(s) => VTEvent::DcsData(s),
@@ -612,7 +612,7 @@ impl VTOwnedEvent {
             VTOwnedEvent::OscStart => VTEvent::OscStart,
             VTOwnedEvent::OscData(s) => VTEvent::OscData(s),
             VTOwnedEvent::OscEnd { data, used_bel } => VTEvent::OscEnd {
-                data: data,
+                data,
                 used_bel: *used_bel,
             },
             VTOwnedEvent::OscCancel => VTEvent::OscCancel,
@@ -632,9 +632,9 @@ pub enum EscInvalid {
 impl std::fmt::Debug for EscInvalid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EscInvalid::One(b) => write!(f, "EscInvalid({:?})", b)?,
-            EscInvalid::Two(b1, b2) => write!(f, "EscInvalid({:?}, {:?})", b1, b2)?,
-            EscInvalid::Three(b1, b2, b3) => write!(f, "EscInvalid({:?}, {:?}, {:?})", b1, b2, b3)?,
+            EscInvalid::One(b) => write!(f, "EscInvalid({b:?})")?,
+            EscInvalid::Two(b1, b2) => write!(f, "EscInvalid({b1:?}, {b2:?})")?,
+            EscInvalid::Three(b1, b2, b3) => write!(f, "EscInvalid({b1:?}, {b2:?}, {b3:?})")?,
         }
         Ok(())
     }
@@ -652,7 +652,7 @@ impl std::fmt::Debug for Esc {
         write!(f, "Esc({:?}", self.intermediates)?;
         write!(f, ", ")?;
         if let Ok(c) = AsciiControl::try_from(self.final_byte as char) {
-            write!(f, "{})", c)?;
+            write!(f, "{c})")?;
         } else {
             write!(f, "{})", self.final_byte as char)?;
         }
@@ -670,7 +670,7 @@ impl std::fmt::Debug for SS2 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Ss2(")?;
         if let Ok(c) = AsciiControl::try_from(self.char as char) {
-            write!(f, "{})", c)?;
+            write!(f, "{c})")?;
         } else {
             write!(f, "{:?})", self.char as char)?;
         }
@@ -688,7 +688,7 @@ impl std::fmt::Debug for SS3 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Ss3(")?;
         if let Ok(c) = AsciiControl::try_from(self.char as char) {
-            write!(f, "{})", c)?;
+            write!(f, "{c})")?;
         } else {
             write!(f, "{:?})", self.char as char)?;
         }
