@@ -7,7 +7,7 @@ authors = ["Matt Mastracci <matthew@mastracci.com>"]
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 repository = "https://github.com/mmastrac/vt-push-parser"
-version = "0.10.1"
+version = "0.10.2"
 
 [workspace.dependencies]
-vt-push-parser = { path = "crates/vt-push-parser", version = "0.10.1" }
+vt-push-parser = { path = "crates/vt-push-parser", version = "0.10.2" }

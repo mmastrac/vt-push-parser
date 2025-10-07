@@ -466,40 +466,6 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
             hold: self.held_byte.is_some(),
         };
 
-        macro_rules! emit {
-            ($state:ident, $i:expr, $cb:expr, $end:expr, $used_bel:expr) => {
-                let hold = std::mem::take(&mut $state.hold);
-                if let Some(emit) = $state.current_emit.take() {
-                    let i = $i;
-                    let range = $state.buffer_idx..(i - hold as usize);
-                    if $end {
-                        if match emit {
-                            VTEmit::Ground => unreachable!(),
-                            VTEmit::Dcs => $cb.event(VTEvent::DcsEnd(&input[range])),
-                            VTEmit::Osc => $cb.event(VTEvent::OscEnd {
-                                data: &input[range],
-                                used_bel: $used_bel,
-                            }),
-                        }
-                        .abort()
-                        {
-                            return i + 1;
-                        }
-                    } else if range.len() > 0 {
-                        if match emit {
-                            VTEmit::Ground => $cb.event(VTEvent::Raw(&input[range])),
-                            VTEmit::Dcs => $cb.event(VTEvent::DcsData(&input[range])),
-                            VTEmit::Osc => $cb.event(VTEvent::OscData(&input[range])),
-                        }
-                        .abort()
-                        {
-                            return i + 1;
-                        }
-                    }
-                }
-            };
-        }
-
         let mut held_byte = self.held_byte.take();
         let mut i = 0;
 
@@ -583,12 +549,28 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                     }
                 }
                 VTAction::End(VTEnd::Dcs) => {
+                    state.current_emit = None;
+                    let hold = std::mem::take(&mut state.hold);
+                    let range = state.buffer_idx..(i.saturating_sub(hold as usize));
+                    if cb.event(VTEvent::DcsEnd(&input[range])).abort() {
+                        return i + 1;
+                    }
                     held_byte = None;
-                    emit!(state, i, cb, true, false);
                 }
                 VTAction::End(VTEnd::Osc { used_bel }) => {
+                    state.current_emit = None;
+                    let hold = std::mem::take(&mut state.hold);
+                    let range = state.buffer_idx..(i.saturating_sub(hold as usize));
+                    if cb
+                        .event(VTEvent::OscEnd {
+                            data: &input[range],
+                            used_bel,
+                        })
+                        .abort()
+                    {
+                        return i + 1;
+                    }
                     held_byte = None;
-                    emit!(state, i, cb, true, used_bel);
                 }
                 VTAction::Buffer(emit) | VTAction::Hold(emit) => {
                     if state.current_emit.is_none()
@@ -1575,10 +1557,20 @@ mod tests {
 
     #[test]
     fn dcs_esc_esc_del() {
-        // ESC P 1:2 q ... ST   -> colon inside header params (invalid)
         let ev = collect_events(b"\x1bP1;2;3|\x1b\x1b\x7fdata\x1b\\");
-        // Expect: no DcsStart; the whole thing is ignored until ST
         eprintln!("{ev:?}");
+    }
+
+    #[test]
+    fn osc_bel() {
+        let mut parser = VTPushParser::new();
+        let mut output = String::new();
+        for b in b"\x1b]X\x07" {
+            parser.feed_with(&[*b], &mut |ev: VTEvent| {
+                output.push_str(&format!("{ev:?}\n"));
+            });
+        }
+        assert_eq!(output.trim(), "OscStart\nOscData('X')\nOscEnd('')");
     }
 
     #[test]

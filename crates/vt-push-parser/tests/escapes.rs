@@ -13,7 +13,7 @@ enum VTAccumulator {
 }
 
 macro_rules! callback {
-    ($result:ident, $ret:expr) => {
+    ($result:ident, $counts:expr, $ret:expr) => {
         |vt_input: VTEvent<'_>| {
             let result = &mut $result;
             match vt_input {
@@ -34,32 +34,44 @@ macro_rules! callback {
                     result.push(VTAccumulator::Esc(format!("{vt_input:?}")))
                 }
                 VTEvent::DcsStart { .. } => {
-                    result.push(VTAccumulator::Dcs(format!("{vt_input:?}, data=")))
+                    result.push(VTAccumulator::Dcs(format!("{vt_input:?}, data=")));
+                    $counts.0 += 1;
                 }
                 VTEvent::DcsData(s) | VTEvent::DcsEnd(s) => {
                     let VTAccumulator::Dcs(acc) = result.last_mut().unwrap() else {
                         panic!("DcsData without DcsStart");
                     };
                     acc.push_str(&encode_string(s));
+                    if matches!(vt_input, VTEvent::DcsEnd(s)) {
+                        $counts.0 -= 1;
+                    }
                 }
                 VTEvent::DcsCancel => {
                     let VTAccumulator::Dcs(acc) = result.last_mut().unwrap() else {
                         panic!("DcsCancel without DcsStart");
                     };
                     *acc = format!("{} (cancelled)", acc.split_once(", data=").unwrap().0);
+                    $counts.0 -= 1;
                 }
-                VTEvent::OscStart => result.push(VTAccumulator::Osc("OscStart, data=".to_string())),
+                VTEvent::OscStart => {
+                    result.push(VTAccumulator::Osc("OscStart, data=".to_string()));
+                    $counts.1 += 1;
+                }
                 VTEvent::OscData(s) | VTEvent::OscEnd { data: s, .. } => {
                     let VTAccumulator::Osc(acc) = result.last_mut().unwrap() else {
                         panic!("OscData without OscStart");
                     };
                     acc.push_str(&encode_string(s));
+                    if matches!(vt_input, VTEvent::OscEnd { data: s, .. }) {
+                        $counts.1 -= 1;
+                    }
                 }
                 VTEvent::OscCancel => {
                     let VTAccumulator::Osc(acc) = result.last_mut().unwrap() else {
                         panic!("OscCancel without OscStart");
                     };
                     *acc = format!("{} (cancelled)", acc.split_once(", data=").unwrap().0);
+                    $counts.1 -= 1;
                 }
             };
             $ret
@@ -91,30 +103,35 @@ fn parse(mode: ParseMode, data: &[&[u8]]) -> String {
 fn parse_normal(data: &[&[u8]]) -> String {
     let mut parser = VTPushParser::new();
     let mut result = Vec::new();
-    let mut callback = callback!(result, ());
+    let mut counts = (0, 0);
+    let mut callback = callback!(result, counts, ());
     for chunk in data {
         parser.feed_with(chunk, &mut callback);
     }
+    assert_eq!(counts, (0, 0), "Start/end counts mismatch");
     collect(result)
 }
 
 fn parse_abortable(data: &[&[u8]]) -> String {
     let mut parser = VTPushParser::new();
     let mut result = Vec::new();
-    let mut callback = callback!(result, true);
+    let mut counts = (0, 0);
+    let mut callback = callback!(result, counts, true);
     for chunk in data {
         assert_eq!(
             parser.feed_with_abortable(chunk, &mut callback),
             chunk.len()
         );
     }
+    assert_eq!(counts, (0, 0), "Start/end counts mismatch");
     collect(result)
 }
 
 fn parse_aborted(data: &[&[u8]]) -> String {
     let mut parser = VTPushParser::new();
     let mut result = Vec::new();
-    let mut callback = callback!(result, false);
+    let mut counts = (0, 0);
+    let mut callback = callback!(result, counts, false);
     for chunk in data {
         let mut chunk = *chunk;
         while !chunk.is_empty() {
@@ -127,6 +144,7 @@ fn parse_aborted(data: &[&[u8]]) -> String {
             chunk = &chunk[parsed..];
         }
     }
+    assert_eq!(counts, (0, 0), "Start/end counts mismatch");
     collect(result)
 }
 
