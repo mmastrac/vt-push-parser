@@ -172,11 +172,7 @@ impl<const INTEREST: u8> VTCapturePushParser<INTEREST> {
         self.parser.idle().map(VTCaptureEvent::VTEvent)
     }
 
-    pub fn feed_with<'this, 'input, F: VTInputCaptureCallback>(
-        &'this mut self,
-        mut input: &'input [u8],
-        mut cb: F,
-    ) {
+    pub fn feed_with<F: VTInputCaptureCallback>(&mut self, mut input: &[u8], mut cb: F) {
         while !input.is_empty() {
             match &mut self.capture {
                 VTCaptureInternal::None => {

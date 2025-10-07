@@ -74,14 +74,14 @@ pub trait VTEventCallback: VTEventCallbackMaybeAbortable<()> {
 
 impl<T: FnMut(VTEvent<'_>)> VTEventCallback for T {
     #[inline(always)]
-    fn event(&mut self, event: VTEvent<'_>) -> () {
+    fn event(&mut self, event: VTEvent<'_>) {
         self(event)
     }
 }
 
 impl<T: VTEventCallback> VTEventCallbackMaybeAbortable<()> for T {
     #[inline(always)]
-    fn event(&mut self, event: VTEvent<'_>) -> () {
+    fn event(&mut self, event: VTEvent<'_>) {
         VTEventCallback::event(self, event)
     }
 }
@@ -419,11 +419,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
     /// parser.feed_with(b"\x1b[32mHello, world!\x1b[0m", MyCallback { output: String::new() });
     /// ```
     #[inline]
-    pub fn feed_with<'this, 'input, F: VTEventCallback>(
-        &'this mut self,
-        input: &'input [u8],
-        mut cb: F,
-    ) {
+    pub fn feed_with<F: VTEventCallback>(&mut self, input: &[u8], mut cb: F) {
         self.feed_with_internal(input, &mut cb);
     }
 
@@ -440,18 +436,18 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
     /// This function returns the number of bytes processed. Note that some
     /// bytes may have been processed any not emitted.
     #[inline]
-    pub fn feed_with_abortable<'this, 'input, F: VTEventCallbackAbortable>(
-        &'this mut self,
-        input: &'input [u8],
+    pub fn feed_with_abortable<F: VTEventCallbackAbortable>(
+        &mut self,
+        input: &[u8],
         mut cb: F,
     ) -> usize {
         self.feed_with_internal(input, &mut cb)
     }
 
     #[inline(always)]
-    fn feed_with_internal<'this, 'input, R: MaybeAbortable, F: VTEventCallbackMaybeAbortable<R>>(
-        &'this mut self,
-        input: &'input [u8],
+    fn feed_with_internal<R: MaybeAbortable, F: VTEventCallbackMaybeAbortable<R>>(
+        &mut self,
+        input: &[u8],
         cb: &mut F,
     ) -> usize {
         if input.is_empty() {
