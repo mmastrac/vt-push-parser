@@ -1,0 +1,4 @@
+<ESC>[H<ESC>[38:5:208mThis is mixed <ESC>[100mANSI and plain text<ESC>[12z
+<ESC>[38:5:208mwith lots of <ESC>[38:5:208mrandom sequences<ESC>[?12m
+which are <ESC>]not<ESC>/not meaningful and just random<ESC>= but a
+good mix and representative <ESC>[Jof real-world data.

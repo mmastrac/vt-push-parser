@@ -37,7 +37,7 @@ fn fmt_utf8_bytes_simple(f: &mut std::fmt::Formatter<'_>, bytes: &[u8]) -> std::
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[derive(Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VTIntermediate {
     pub(crate) data: [u8; 2],
 }
@@ -149,7 +149,7 @@ pub(crate) type Params = SmallVec<[Param; 8]>;
 static EMPTY_PARAMS: Params = Params::new_const();
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct ParamBuf<'a> {
     pub(crate) params: &'a Params,
@@ -348,7 +348,7 @@ impl<'a> NumericParamBuf<'a> {
 /// A union of all possible events that can be emitted by the parser, with
 /// borrowed data.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub enum VTEvent<'a> {
     // Plain printable text from GROUND (coalesced)
     Raw(&'a [u8]),
@@ -800,7 +800,7 @@ impl VTOwnedEvent {
 
 /// An invalid escape sequence.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EscInvalid {
     One(u8),
     Two(u8, u8),
@@ -825,7 +825,7 @@ impl std::fmt::Debug for EscInvalid {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Esc {
     pub intermediates: VTIntermediate,
     pub private: Option<u8>,
@@ -849,7 +849,7 @@ impl std::fmt::Debug for Esc {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SS2 {
     pub char: u8,
 }
@@ -867,7 +867,7 @@ impl std::fmt::Debug for SS2 {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SS3 {
     pub char: u8,
 }
@@ -885,7 +885,7 @@ impl std::fmt::Debug for SS3 {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct CSI<'a> {
     pub private: Option<u8>,
     pub params: ParamBuf<'a>,
@@ -911,7 +911,7 @@ impl<'a> std::fmt::Debug for CSI<'a> {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct DCS<'a> {
     pub private: Option<u8>,
     pub params: ParamBuf<'a>,

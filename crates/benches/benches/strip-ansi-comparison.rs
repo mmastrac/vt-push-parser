@@ -4,6 +4,7 @@ const CORPUS_REPEAT: usize = 10;
 
 static NO_ANSI_CORPUS: &str = include_str!("no-ansi-corpus.txt");
 static ESCAPE_SEQUENCES: &str = include_str!("escape-sequences.txt");
+static MIXED: &str = include_str!("mixed.txt");
 
 static ANSI_ZERO_PERCENT: LazyLock<String> = LazyLock::new(|| corpus(0));
 static ANSI_10_PERCENT: LazyLock<String> = LazyLock::new(|| corpus(10));

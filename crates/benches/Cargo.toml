@@ -8,6 +8,9 @@ repository = "https://github.com/mmastrac/vt-push-parser"
 description = "Benches for the vt-push-parser crate"
 readme = "README.md"
 
+[profile.release]
+debug = true
+
 [dependencies]
 strip-ansi = "0.1.0"
 strip-ansi-escapes = "0.2.1"
@@ -17,9 +20,14 @@ fast-strip-ansi = { path = "../fast-strip-ansi" }
 [dev-dependencies]
 divan = "0.1.21"
 pretty_assertions = "1.4.1"
+vte = "0.15"
 
 [[bench]]
-name = "comparison"
+name = "strip-ansi"
 harness = false
-path = "benches/comparison.rs"
+path = "benches/strip-ansi-comparison.rs"
 
+[[bench]]
+name = "vt-parse"
+harness = false
+path = "benches/vt-parse-comparison.rs"
