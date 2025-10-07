@@ -995,6 +995,13 @@ mod test {
             vec![Some(1), Some(2), Some(3), Some(4), None, None]
         );
 
+        assert_eq!(numeric_param_buf.first().unwrap().sole(), None);
+        assert_eq!(numeric_param_buf.first().unwrap().first(), Some(1));
+        assert_eq!(numeric_param_buf.get(1).unwrap().sole(), Some(4));
+        assert_eq!(numeric_param_buf.get(1).unwrap().first(), Some(4));
+        assert_eq!(numeric_param_buf.get(2).unwrap().sole(), None);
+        assert_eq!(numeric_param_buf.get(2).unwrap().first(), None);
+
         assert_eq!(
             numeric_param_buf
                 .try_write(&mut [0, 0, 0, 0, 0, 0])

@@ -271,6 +271,24 @@ x<ESC>[1;2;3<SUB>y
 xy
 ```
 ---
+## CSI: Request Locator Position (DECRQP)
+```
+<ESC>[0'|
+```
+
+```
+Csi('0', ''', '|')
+```
+---
+## CSI: Selective Erase Rectangular Area (DECSERA).
+```
+<ESC>[0;1;2;3${
+```
+
+```
+Csi('0', '1', '2', '3', '$', '{')
+```
+---
 ## DCS: Device control string cancelled by CAN
 ```
 x<ESC>P 1;2;3|data<CAN>y
@@ -540,5 +558,96 @@ Esc('', c)
 
 ```
 Esc('?', '', y)
+```
+---
+## ESC: DECPAM/DECPNM
+```
+<ESC>=<ESC>>
+```
+
+```
+Esc('', =)
+Esc('', >)
+```
+---
+## ESC: DEC double-line
+```
+<ESC>#3
+```
+
+```
+Esc('#', 3)
+```
+---
+## Select default character set
+```
+<ESC>%@
+```
+
+```
+Esc('%', @)
+```
+---
+## Designate G0 character set
+```
+<ESC>(C
+```
+
+```
+Esc('(', C)
+```
+---
+## Designate G1 character set
+```
+<ESC>)C
+```
+
+```
+Esc(')', C)
+```
+---
+## Designate G2 character set
+```
+<ESC>*C
+```
+
+```
+Esc('*', C)
+```
+---
+## Designate G3 character set
+```
+<ESC>+C
+```
+
+```
+Esc('+', C)
+```
+---
+## ESC: Invoke the G3 Character Set as GR (LS3R)
+```
+<ESC>|
+```
+
+```
+Esc('', |)
+```
+---
+## ESC: Invoke the G2 Character Set as GR (LS2R)
+```
+<ESC>}
+```
+
+```
+Esc('', })
+```
+---
+## ESC: Invoke the G1 Character Set as GR (LS1R)
+```
+<ESC>~
+```
+
+```
+Esc('', ~)
 ```
 ---

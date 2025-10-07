@@ -125,7 +125,7 @@ dependencies = [
 
 [[package]]
 name = "fast-strip-ansi"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "vt-push-parser",
 ]
@@ -322,7 +322,7 @@ checksum = "f63a545481291138910575129486daeaf8ac54aee4387fe7906919f7830c7d9d"
 
 [[package]]
 name = "vt-push-parser"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "hex",
  "hxdmp",

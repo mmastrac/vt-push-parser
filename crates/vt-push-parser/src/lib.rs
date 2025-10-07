@@ -160,6 +160,7 @@ fn is_printable(b: u8) -> bool {
 }
 #[inline]
 fn is_intermediate(b: u8) -> bool {
+    // Intermediates: <SP> ! " # $ % & ' ( ) * + , - . /
     (0x20..=0x2F).contains(&b)
 }
 #[inline]
@@ -832,10 +833,20 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                 }
                 VTAction::None
             }
-            c if is_priv(c) => {
-                self.priv_prefix = Some(c);
+            // Not all private sequences are supported -- only ESC ? <final>
+            b'?' => {
+                self.priv_prefix = Some(b);
                 self.st = EscInt;
                 VTAction::None
+            }
+            // The rest of the private sequences become ESC <final>
+            c if is_priv(c) => {
+                self.st = Ground;
+                VTAction::Event(VTEvent::Esc(Esc {
+                    intermediates: VTIntermediate::empty(),
+                    private: None,
+                    final_byte: b,
+                }))
             }
             CSI => {
                 if INTEREST & VT_PARSER_INTEREST_CSI == 0 {
