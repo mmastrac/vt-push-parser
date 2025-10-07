@@ -149,37 +149,31 @@ enum VTEnd {
     Osc { used_bel: bool },
 }
 
-#[inline]
-const fn is_c0(b: u8) -> bool {
-    // Control characters, with the exception of the common whitespace controls.
-    b <= 0x1F && b != b'\r' && b != b'\n' && b != b'\t'
+macro_rules! def_pattern {
+    ($name:ident => $pattern:pat) => {
+        #[inline]
+        #[allow(unused)]
+        const fn $name(b: u8) -> bool {
+            matches!(b, $pattern)
+        }
+
+        #[allow(unused)]
+        macro_rules! $name {
+            () => {
+                $pattern
+            };
+        }
+    };
 }
-#[inline]
-const fn is_any_c0(b: u8) -> bool {
-    // Control characters, with the exception of the common whitespace controls.
-    b <= 0x1F
-}
-#[inline]
-fn is_printable(b: u8) -> bool {
-    (0x20..=0x7E).contains(&b)
-}
-#[inline]
-fn is_intermediate(b: u8) -> bool {
-    // Intermediates: <SP> ! " # $ % & ' ( ) * + , - . /
-    (0x20..=0x2F).contains(&b)
-}
-#[inline]
-const fn is_final(b: u8) -> bool {
-    b >= 0x40 && b <= 0x7E
-}
-#[inline]
-fn is_digit(b: u8) -> bool {
-    b.is_ascii_digit()
-}
-#[inline]
-fn is_priv(b: u8) -> bool {
-    matches!(b, b'<' | b'=' | b'>' | b'?')
-}
+
+def_pattern!(is_c0 => 0x00..=0x08 | 0x0b..=0x0c | 0x0e..=0x1f);
+def_pattern!(is_any_c0 => 0x00..=0x1f);
+def_pattern!(is_printable => b' '..=b'~');
+def_pattern!(is_intermediate => b' '..=b'/');
+def_pattern!(is_final => 0x40..=0x7e);
+def_pattern!(is_priv => b'<' | b'=' | b'>' | b'?');
+def_pattern!(is_priv_no_q => b'<' | b'=' | b'>');
+def_pattern!(is_digit => b'0'..=b'9');
 
 macro_rules! byte_predicate {
     (|$p:ident| $body:block) => {{
@@ -675,36 +669,6 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
-    fn push_with(&mut self, b: u8) -> VTAction {
-        use State::*;
-        match self.st {
-            Ground => self.on_ground(b),
-            Escape => self.on_escape(b),
-            EscInt => self.on_esc_int(b),
-            EscSs2 => self.on_esc_ss2(b),
-            EscSs3 => self.on_esc_ss3(b),
-
-            CsiEntry => self.on_csi_entry(b),
-            CsiParam => self.on_csi_param(b),
-            CsiInt => self.on_csi_int(b),
-            CsiIgnore => self.on_csi_ignore(b),
-
-            DcsEntry => self.on_dcs_entry(b),
-            DcsParam => self.on_dcs_param(b),
-            DcsInt => self.on_dcs_int(b),
-            DcsIgnore => self.on_dcs_ignore(b),
-            DcsIgnoreEsc => self.on_dcs_ignore_esc(b),
-            DcsPassthrough => self.on_dcs_pass(b),
-            DcsEsc => self.on_dcs_esc(b),
-
-            OscString => self.on_osc_string(b),
-            OscEsc => self.on_osc_esc(b),
-
-            SosPmApcString => self.on_spa_string(b),
-            SpaEsc => self.on_spa_esc(b),
-        }
-    }
-
     pub fn finish<F: FnMut(VTEvent)>(&mut self, _cb: &mut F) {
         self.reset_collectors();
         self.st = State::Ground;
@@ -773,651 +737,622 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
     // State handlers
     // =====================
 
-    fn on_ground(&mut self, b: u8) -> VTAction {
-        match b {
-            ESC => {
-                self.clear_hdr_collectors();
-                self.st = State::Escape;
-                VTAction::None
-            }
-            DEL => VTAction::Event(VTEvent::C0(DEL)),
-            c if is_c0(c) => VTAction::Event(VTEvent::C0(c)),
-            p if is_printable(p) => VTAction::Buffer(VTEmit::Ground),
-            _ => VTAction::Buffer(VTEmit::Ground), // safe fallback
-        }
-    }
-
-    fn on_escape(&mut self, b: u8) -> VTAction {
+    fn push_with(&mut self, b: u8) -> VTAction {
         use State::*;
-        match b {
-            CAN | SUB => {
-                self.st = Ground;
-                if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
-                    VTAction::None
-                } else {
-                    VTAction::Event(invalid!(b))
+
+        macro_rules! state_machine {
+            (def $c:ident $(
+                $state:ident => { $( $p:pat
+                    $(if $( $if_ident:ident $( ($call_ident:ident) )? $( == $literal:literal)? $(||)? )+)?
+                    => $block:expr $(,)? )* }
+            )*) => {
+                #[allow(unused)]
+                match self.st {
+                    $(
+                        $state => {
+                            match b {
+                                $(
+                                    $c @ state_machine!(pattern $p $(if $( ($if_ident ($($call_ident)?) ($($literal)?)) )+ )?) => $block,
+                                )*
+                            }
+                        }
+                    )*
                 }
-            }
-            // NOTE: DEL should be ignored normally, but for better recovery,
-            // we move to ground state here instead.
-            DEL => {
-                self.st = Ground;
-                if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
+            };
+            (pattern $pat:pat if $( ($if_ident:ident ($($call_ident:ident)?) ($($literal:literal)?)) )+ ) => {
+                $(
+                    state_machine!(pattern_if ($if_ident) ($($call_ident)?) ($($literal)?) )
+                )|+
+            };
+            (pattern $pat:pat) => {
+                $pat
+            };
+            (pattern_if ($any:ident) ($call_ident:ident) ()) => {
+                $any!()
+            };
+            (pattern_if ($if_ident:ident) () ($literal:literal)) => {
+                $literal
+            };
+        }
+
+        // This builds a mega state machine that is somewhat easier for LLVM to
+        // optimize than nesting functions. We parse the match-like patterns
+        // into true byte ranges for the best possible performance.
+
+        // Note that because of macro limitations, every binding is declared as
+        // "c".
+        state_machine! {
+            def c
+            Ground => {
+                ESC => {
+                    self.clear_hdr_collectors();
+                    self.st = State::Escape;
                     VTAction::None
-                } else {
-                    VTAction::Event(invalid!(b))
                 }
+                DEL => VTAction::Event(VTEvent::C0(DEL)),
+                c if is_c0(c) => VTAction::Event(VTEvent::C0(c)),
+                _ => VTAction::Buffer(VTEmit::Ground),
             }
-            c if is_intermediate(c) => {
-                if self.ints.push(c) {
-                    self.st = EscInt;
-                } else {
+            Escape => {
+                CAN | SUB => {
                     self.st = Ground;
+                    if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
+                        VTAction::None
+                    } else {
+                        VTAction::Event(invalid!(b))
+                    }
                 }
-                VTAction::None
-            }
-            // Not all private sequences are supported -- only ESC ? <final>
-            b'?' => {
-                self.priv_prefix = Some(b);
-                self.st = EscInt;
-                VTAction::None
-            }
-            // The rest of the private sequences become ESC <final>
-            c if is_priv(c) => {
-                self.st = Ground;
-                VTAction::Event(VTEvent::Esc(Esc {
-                    intermediates: VTIntermediate::empty(),
-                    private: None,
-                    final_byte: b,
-                }))
-            }
-            CSI => {
-                if INTEREST & VT_PARSER_INTEREST_CSI == 0 {
-                    self.st = CsiIgnore;
-                } else {
-                    self.st = CsiEntry;
+                // NOTE: DEL should be ignored normally, but for better recovery,
+                // we move to ground state here instead.
+                DEL => {
+                    self.st = Ground;
+                    if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
+                        VTAction::None
+                    } else {
+                        VTAction::Event(invalid!(b))
+                    }
                 }
-                VTAction::None
-            }
-            DCS => {
-                if INTEREST & VT_PARSER_INTEREST_DCS == 0 {
-                    self.st = DcsIgnore;
-                } else {
-                    self.st = DcsEntry;
-                }
-                VTAction::None
-            }
-            OSC => {
-                self.st = OscString;
-                VTAction::Event(VTEvent::OscStart)
-            }
-            SS2 => {
-                self.st = EscSs2;
-                VTAction::None
-            }
-            SS3 => {
-                self.st = EscSs3;
-                VTAction::None
-            }
-            SOS | PM | APC => {
-                self.st = State::SosPmApcString;
-                VTAction::None
-            }
-            c if is_final(c) || is_digit(c) => {
-                self.st = Ground;
-                VTAction::Event(VTEvent::Esc(Esc {
-                    intermediates: self.ints,
-                    private: self.priv_prefix.take(),
-                    final_byte: c,
-                }))
-            }
-            ESC => {
-                // ESC ESC allowed, but we stay in the current state
-                VTAction::Event(VTEvent::C0(ESC))
-            }
-            _ => {
-                self.st = Ground;
-                if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
+                c if is_intermediate(c) => {
+                    if self.ints.push(c) {
+                        self.st = EscInt;
+                    } else {
+                        self.st = Ground;
+                    }
                     VTAction::None
-                } else {
-                    VTAction::Event(invalid!(b))
                 }
-            }
-        }
-    }
-
-    fn on_esc_int(&mut self, b: u8) -> VTAction {
-        use State::*;
-        match b {
-            CAN | SUB => {
-                self.st = Ground;
-                if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
+                // Not all private sequences are supported -- only ESC ? <final>
+                b'?' => {
+                    self.priv_prefix = Some(b);
+                    self.st = EscInt;
                     VTAction::None
-                } else {
-                    VTAction::Event(invalid!(self.priv_prefix, self.ints, b))
                 }
-            }
-            // NOTE: DEL should be ignored normally, but for better recovery,
-            // we move to ground state here instead.
-            DEL => {
-                self.st = Ground;
-                if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
+                // The rest of the private sequences become ESC <final>
+                c if is_priv_no_q(c) => {
+                    self.st = Ground;
+                    VTAction::Event(VTEvent::Esc(Esc {
+                        intermediates: VTIntermediate::empty(),
+                        private: None,
+                        final_byte: b,
+                    }))
+                }
+                CSI => {
+                    if INTEREST & VT_PARSER_INTEREST_CSI == 0 {
+                        self.st = CsiIgnore;
+                    } else {
+                        self.st = CsiEntry;
+                    }
                     VTAction::None
-                } else {
-                    VTAction::Event(invalid!(self.priv_prefix, self.ints, b))
+                }
+                DCS => {
+                    if INTEREST & VT_PARSER_INTEREST_DCS == 0 {
+                        self.st = DcsIgnore;
+                    } else {
+                        self.st = DcsEntry;
+                    }
+                    VTAction::None
+                }
+                OSC => {
+                    self.st = OscString;
+                    VTAction::Event(VTEvent::OscStart)
+                }
+                SS2 => {
+                    self.st = EscSs2;
+                    VTAction::None
+                }
+                SS3 => {
+                    self.st = EscSs3;
+                    VTAction::None
+                }
+                SOS | PM | APC => {
+                    self.st = State::SosPmApcString;
+                    VTAction::None
+                }
+                c if is_final(c) || is_digit(c) => {
+                    self.st = Ground;
+                    VTAction::Event(VTEvent::Esc(Esc {
+                        intermediates: self.ints,
+                        private: self.priv_prefix.take(),
+                        final_byte: c,
+                    }))
+                }
+                ESC => {
+                    // ESC ESC allowed, but we stay in the current state
+                    VTAction::Event(VTEvent::C0(ESC))
+                }
+                _ => {
+                    self.st = Ground;
+                    if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
+                        VTAction::None
+                    } else {
+                        VTAction::Event(invalid!(b))
+                    }
                 }
             }
-            c if is_intermediate(c) => {
-                if !self.ints.push(c) {
+            EscInt => {
+                CAN | SUB => {
                     self.st = Ground;
                     if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
                         VTAction::None
                     } else {
                         VTAction::Event(invalid!(self.priv_prefix, self.ints, b))
                     }
-                } else {
-                    VTAction::None
                 }
-            }
-            c if is_final(c) || is_digit(c) => {
-                self.st = Ground;
-                VTAction::Event(VTEvent::Esc(Esc {
-                    intermediates: self.ints,
-                    private: self.priv_prefix.take(),
-                    final_byte: c,
-                }))
-            }
-            // NOTE: We assume that we want to stay in the escape state
-            // to recover from this state.
-            ESC => {
-                self.st = Escape;
-                if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
-                    VTAction::None
-                } else {
-                    VTAction::Event(invalid!(self.priv_prefix, self.ints))
-                }
-            }
-            c => {
-                self.st = Ground;
-                if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
-                    VTAction::None
-                } else {
-                    VTAction::Event(invalid!(self.priv_prefix, self.ints, c))
-                }
-            }
-        }
-    }
-
-    fn on_esc_ss2(&mut self, b: u8) -> VTAction {
-        use State::*;
-        self.st = Ground;
-        match b {
-            CAN | SUB => {
-                if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
-                    VTAction::None
-                } else {
-                    VTAction::Event(invalid!(SS2, b))
-                }
-            }
-            // NOTE: We assume that we want to stay in the escape state
-            // to recover from this state.
-            ESC => {
-                self.st = Escape;
-                if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
-                    VTAction::None
-                } else {
-                    VTAction::Event(invalid!(SS2))
-                }
-            }
-            c => VTAction::Event(VTEvent::Ss2(SS2 { char: c })),
-        }
-    }
-
-    fn on_esc_ss3(&mut self, b: u8) -> VTAction {
-        use State::*;
-        self.st = Ground;
-        match b {
-            CAN | SUB => {
-                if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
-                    VTAction::None
-                } else {
-                    VTAction::Event(invalid!(SS3, b))
-                }
-            }
-            // NOTE: We assume that we want to stay in the escape state
-            // to recover from this state.
-            ESC => {
-                self.st = Escape;
-                if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
-                    VTAction::None
-                } else {
-                    VTAction::Event(invalid!(SS3))
-                }
-            }
-            c => VTAction::Event(VTEvent::Ss3(SS3 { char: c })),
-        }
-    }
-
-    // ---- CSI
-    fn on_csi_entry(&mut self, b: u8) -> VTAction {
-        use State::*;
-        match b {
-            CAN | SUB => {
-                self.st = Ground;
-                VTAction::None
-            }
-            DEL => VTAction::None,
-            ESC => {
-                self.st = Escape;
-                VTAction::None
-            }
-            // Weird case: if we encounter C0 inside of CSI, emit it while we parse.
-            c if is_any_c0(c) => VTAction::Event(VTEvent::C0(c)),
-            c if is_priv(c) => {
-                self.priv_prefix = Some(c);
-                self.st = CsiParam;
-                VTAction::None
-            }
-            d if is_digit(d) => {
-                self.cur_param.push(d);
-                self.st = CsiParam;
-                VTAction::None
-            }
-            b';' => {
-                self.next_param();
-                self.st = CsiParam;
-                VTAction::None
-            }
-            b':' => {
-                self.cur_param.push(b':');
-                self.st = CsiParam;
-                VTAction::None
-            }
-            c if is_intermediate(c) => {
-                if self.ints.push(c) {
-                    self.st = CsiInt;
-                } else {
+                // NOTE: DEL should be ignored normally, but for better recovery,
+                // we move to ground state here instead.
+                DEL => {
                     self.st = Ground;
+                    if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
+                        VTAction::None
+                    } else {
+                        VTAction::Event(invalid!(self.priv_prefix, self.ints, b))
+                    }
                 }
-                VTAction::None
-            }
-            c if is_final(c) => {
-                self.st = Ground;
-                self.emit_csi(c)
-            }
-            _ => {
-                self.st = CsiIgnore;
-                VTAction::None
-            }
-        }
-    }
-
-    fn on_csi_param(&mut self, b: u8) -> VTAction {
-        use State::*;
-        match b {
-            CAN | SUB => {
-                self.st = Ground;
-                VTAction::None
-            }
-            DEL => VTAction::None,
-            ESC => {
-                self.st = Escape;
-                VTAction::None
-            }
-            // Weird case: if we encounter C0 inside of CSI, emit it while we parse.
-            c if is_any_c0(c) => VTAction::Event(VTEvent::C0(c)),
-            d if is_digit(d) => {
-                self.cur_param.push(d);
-                VTAction::None
-            }
-            b';' => {
-                self.next_param();
-                VTAction::None
-            }
-            b':' => {
-                self.cur_param.push(b':');
-                VTAction::None
-            }
-            c if is_intermediate(c) => {
-                if self.ints.push(c) {
-                    self.st = CsiInt;
-                } else {
+                c if is_intermediate(c) => {
+                    if !self.ints.push(c) {
+                        self.st = Ground;
+                        if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
+                            VTAction::None
+                        } else {
+                            VTAction::Event(invalid!(self.priv_prefix, self.ints, b))
+                        }
+                    } else {
+                        VTAction::None
+                    }
+                }
+                c if is_final(c) || is_digit(c) => {
                     self.st = Ground;
+                    VTAction::Event(VTEvent::Esc(Esc {
+                        intermediates: self.ints,
+                        private: self.priv_prefix.take(),
+                        final_byte: c,
+                    }))
                 }
-                VTAction::None
-            }
-            c if is_final(c) => {
-                self.st = Ground;
-                self.emit_csi(c)
-            }
-            _ => {
-                self.st = CsiIgnore;
-                VTAction::None
-            }
-        }
-    }
-
-    fn on_csi_int(&mut self, b: u8) -> VTAction {
-        use State::*;
-        match b {
-            CAN | SUB => {
-                self.st = Ground;
-                VTAction::None
-            }
-            DEL => VTAction::None,
-            ESC => {
-                self.st = Escape;
-                VTAction::None
-            }
-            // Weird case: if we encounter C0 inside of CSI, emit it while we parse.
-            c if is_any_c0(c) => VTAction::Event(VTEvent::C0(c)),
-            c if is_intermediate(c) => {
-                if self.ints.push(c) {
-                    self.st = CsiInt;
-                } else {
+                // NOTE: We assume that we want to stay in the escape state
+                // to recover from this state.
+                ESC => {
+                    self.st = Escape;
+                    if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
+                        VTAction::None
+                    } else {
+                        VTAction::Event(invalid!(self.priv_prefix, self.ints))
+                    }
+                }
+                _ => {
                     self.st = Ground;
+                    if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
+                        VTAction::None
+                    } else {
+                        VTAction::Event(invalid!(self.priv_prefix, self.ints, c))
+                    }
                 }
-                VTAction::None
             }
-            c if is_final(c) => {
-                self.st = Ground;
-                self.emit_csi(c)
+            EscSs2 => {
+                CAN | SUB => {
+                    self.st = Ground;
+                    if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
+                        VTAction::None
+                    } else {
+                        VTAction::Event(invalid!(SS2, b))
+                    }
+                }
+                // NOTE: We assume that we want to stay in the escape state
+                // to recover from this state.
+                ESC => {
+                    self.st = Escape;
+                    if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
+                        VTAction::None
+                    } else {
+                        VTAction::Event(invalid!(SS2))
+                    }
+                }
+                _ => {
+                    self.st = Ground;
+                    VTAction::Event(VTEvent::Ss2(SS2 { char: c }))
+                }
             }
-            _ => {
-                self.st = CsiIgnore;
-                VTAction::None
+            EscSs3 => {
+                CAN | SUB => {
+                    self.st = Ground;
+                    if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
+                        VTAction::None
+                    } else {
+                        VTAction::Event(invalid!(SS3, b))
+                    }
+                }
+                // NOTE: We assume that we want to stay in the escape state
+                // to recover from this state.
+                ESC => {
+                    self.st = Escape;
+                    if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
+                        VTAction::None
+                    } else {
+                        VTAction::Event(invalid!(SS3))
+                    }
+                }
+                _ => {
+                    self.st = Ground;
+                    VTAction::Event(VTEvent::Ss3(SS3 { char: c }))
+                }
             }
-        }
-    }
-
-    fn on_csi_ignore(&mut self, b: u8) -> VTAction {
-        use State::*;
-        match b {
-            CAN | SUB => {
-                self.st = Ground;
-                VTAction::None
+            CsiEntry => {
+                CAN | SUB => {
+                    self.st = Ground;
+                    VTAction::None
+                }
+                DEL => VTAction::None,
+                ESC => {
+                    self.st = Escape;
+                    VTAction::None
+                }
+                // Weird case: if we encounter C0 inside of CSI, emit it while we parse.
+                c if is_any_c0(c) => VTAction::Event(VTEvent::C0(c)),
+                c if is_priv(c) => {
+                    self.priv_prefix = Some(c);
+                    self.st = CsiParam;
+                    VTAction::None
+                }
+                c if is_digit(c) => {
+                    self.cur_param.push(c);
+                    self.st = CsiParam;
+                    VTAction::None
+                }
+                b';' => {
+                    self.next_param();
+                    self.st = CsiParam;
+                    VTAction::None
+                }
+                b':' => {
+                    self.cur_param.push(b':');
+                    self.st = CsiParam;
+                    VTAction::None
+                }
+                c if is_intermediate(c) => {
+                    if self.ints.push(c) {
+                        self.st = CsiInt;
+                    } else {
+                        self.st = Ground;
+                    }
+                    VTAction::None
+                }
+                c if is_final(c) => {
+                    self.st = Ground;
+                    self.emit_csi(c)
+                }
+                _ => {
+                    self.st = CsiIgnore;
+                    VTAction::None
+                }
             }
-            DEL => VTAction::None,
-            ESC => {
-                self.st = Escape;
-                VTAction::None
+            CsiParam => {
+                CAN | SUB => {
+                    self.st = Ground;
+                    VTAction::None
+                }
+                DEL => VTAction::None,
+                ESC => {
+                    self.st = Escape;
+                    VTAction::None
+                }
+                // Weird case: if we encounter C0 inside of CSI, emit it while we parse.
+                c if is_any_c0(c) => VTAction::Event(VTEvent::C0(c)),
+                c if is_digit(c) => {
+                    self.cur_param.push(c);
+                    VTAction::None
+                }
+                b';' => {
+                    self.next_param();
+                    VTAction::None
+                }
+                b':' => {
+                    self.cur_param.push(b':');
+                    VTAction::None
+                }
+                c if is_intermediate(c) => {
+                    if self.ints.push(c) {
+                        self.st = CsiInt;
+                    } else {
+                        self.st = Ground;
+                    }
+                    VTAction::None
+                }
+                c if is_final(c) => {
+                    self.st = Ground;
+                    self.emit_csi(c)
+                }
+                _ => {
+                    self.st = CsiIgnore;
+                    VTAction::None
+                }
             }
-            c if is_final(c) => {
-                self.st = Ground;
-                VTAction::None
+            CsiInt => {
+                CAN | SUB => {
+                    self.st = Ground;
+                    VTAction::None
+                }
+                DEL => VTAction::None,
+                ESC => {
+                    self.st = Escape;
+                    VTAction::None
+                }
+                // Weird case: if we encounter C0 inside of CSI, emit it while we parse.
+                c if is_any_c0(c) => VTAction::Event(VTEvent::C0(c)),
+                c if is_intermediate(c) => {
+                    if self.ints.push(c) {
+                        self.st = CsiInt;
+                    } else {
+                        self.st = Ground;
+                    }
+                    VTAction::None
+                }
+                c if is_final(c) => {
+                    self.st = Ground;
+                    self.emit_csi(c)
+                }
+                _ => {
+                    self.st = CsiIgnore;
+                    VTAction::None
+                }
             }
-            _ => VTAction::None,
-        }
-    }
-
-    // ---- DCS
-    fn on_dcs_entry(&mut self, b: u8) -> VTAction {
-        use State::*;
-        match b {
-            CAN | SUB => {
-                self.st = Ground;
-                VTAction::None
+            CsiIgnore => {
+                CAN | SUB => {
+                    self.st = Ground;
+                    VTAction::None
+                }
+                DEL => VTAction::None,
+                ESC => {
+                    self.st = Escape;
+                    VTAction::None
+                }
+                c if is_final(c) => {
+                    self.st = Ground;
+                    VTAction::None
+                }
+                _ => VTAction::None,
             }
-            DEL => VTAction::None,
-            ESC => {
-                self.st = Escape;
-                VTAction::None
+            DcsEntry => {
+                CAN | SUB => {
+                    self.st = Ground;
+                    VTAction::None
+                }
+                DEL => VTAction::None,
+                ESC => {
+                    self.st = Escape;
+                    VTAction::None
+                }
+                c if is_priv(c) => {
+                    self.priv_prefix = Some(c);
+                    self.st = DcsParam;
+                    VTAction::None
+                }
+                c if is_digit(c) => {
+                    self.cur_param.push(c);
+                    self.st = DcsParam;
+                    VTAction::None
+                }
+                b';' => {
+                    self.next_param();
+                    self.st = DcsParam;
+                    VTAction::None
+                }
+                b':' => {
+                    self.st = DcsIgnore;
+                    VTAction::None
+                }
+                c if is_intermediate(c) => {
+                    if self.ints.push(c) {
+                        self.st = DcsInt;
+                    } else {
+                        self.st = Ground;
+                    }
+                    VTAction::None
+                }
+                c if is_final(c) => {
+                    self.st = DcsPassthrough;
+                    self.dcs_start(c)
+                }
+                _ => {
+                    self.st = DcsIgnore;
+                    VTAction::None
+                }
             }
-            c if is_priv(c) => {
-                self.priv_prefix = Some(c);
-                self.st = DcsParam;
-                VTAction::None
-            }
-            d if is_digit(d) => {
-                self.cur_param.push(d);
-                self.st = DcsParam;
-                VTAction::None
-            }
-            b';' => {
-                self.next_param();
-                self.st = DcsParam;
-                VTAction::None
-            }
-            b':' => {
-                self.st = DcsIgnore;
-                VTAction::None
-            }
-            c if is_intermediate(c) => {
-                if self.ints.push(c) {
+            DcsParam => {
+                CAN | SUB => {
+                    self.st = Ground;
+                    VTAction::None
+                }
+                DEL => VTAction::None,
+                ESC => {
+                    self.st = Escape;
+                    VTAction::None
+                }
+                c if is_digit(c) => {
+                    self.cur_param.push(c);
+                    VTAction::None
+                }
+                b';' => {
+                    self.next_param();
+                    VTAction::None
+                }
+                b':' => {
+                    self.st = DcsIgnore;
+                    VTAction::None
+                }
+                c if is_intermediate(c) => {
+                    if self.ints.push(c) {
+                        self.st = DcsInt;
+                    } else {
+                        self.st = Ground;
+                    }
                     self.st = DcsInt;
-                } else {
-                    self.st = Ground;
+                    VTAction::None
                 }
-                VTAction::None
-            }
-            c if is_final(c) => {
-                self.st = DcsPassthrough;
-                self.dcs_start(c)
-            }
-            _ => {
-                self.st = DcsIgnore;
-                VTAction::None
-            }
-        }
-    }
-
-    fn on_dcs_param(&mut self, b: u8) -> VTAction {
-        use State::*;
-        match b {
-            CAN | SUB => {
-                self.st = Ground;
-                VTAction::None
-            }
-            DEL => VTAction::None,
-            ESC => {
-                self.st = Escape;
-                VTAction::None
-            }
-            d if is_digit(d) => {
-                self.cur_param.push(d);
-                VTAction::None
-            }
-            b';' => {
-                self.next_param();
-                VTAction::None
-            }
-            b':' => {
-                self.st = DcsIgnore;
-                VTAction::None
-            }
-            c if is_intermediate(c) => {
-                if self.ints.push(c) {
-                    self.st = DcsInt;
-                } else {
-                    self.st = Ground;
+                c if is_final(c) => {
+                    self.st = DcsPassthrough;
+                    self.dcs_start(c)
                 }
-                self.st = DcsInt;
-                VTAction::None
-            }
-            c if is_final(c) => {
-                self.st = DcsPassthrough;
-                self.dcs_start(c)
-            }
-            _ => {
-                self.st = DcsIgnore;
-                VTAction::None
-            }
-        }
-    }
-
-    fn on_dcs_int(&mut self, b: u8) -> VTAction {
-        use State::*;
-        match b {
-            CAN | SUB => {
-                self.st = Ground;
-                VTAction::None
-            }
-            DEL => VTAction::None,
-            ESC => {
-                self.st = Escape;
-                VTAction::None
-            }
-            c if is_intermediate(c) => {
-                if self.ints.push(c) {
-                    self.st = DcsInt;
-                } else {
-                    self.st = Ground;
+                _ => {
+                    self.st = DcsIgnore;
+                    VTAction::None
                 }
-                VTAction::None
             }
-            c if is_final(c) || is_digit(c) || c == b':' || c == b';' => {
-                self.st = DcsPassthrough;
-                self.dcs_start(c)
+            DcsInt => {
+                CAN | SUB => {
+                    self.st = Ground;
+                    VTAction::None
+                }
+                DEL => VTAction::None,
+                ESC => {
+                    self.st = Escape;
+                    VTAction::None
+                }
+                c if is_intermediate(c) => {
+                    if self.ints.push(c) {
+                        self.st = DcsInt;
+                    } else {
+                        self.st = Ground;
+                    }
+                    VTAction::None
+                }
+                c if is_final(c) || is_digit(c) || c == b':' || c == b';' => {
+                    self.st = DcsPassthrough;
+                    self.dcs_start(c)
+                }
+                _ => {
+                    self.st = DcsIgnore;
+                    VTAction::None
+                }
             }
-            _ => {
-                self.st = DcsIgnore;
-                VTAction::None
+            DcsIgnore => {
+                CAN | SUB => {
+                    self.st = Ground;
+                    VTAction::None
+                }
+                DEL => VTAction::None,
+                ESC => {
+                    self.st = DcsIgnoreEsc;
+                    VTAction::None
+                }
+                _ => VTAction::None,
             }
-        }
-    }
-
-    fn on_dcs_ignore(&mut self, b: u8) -> VTAction {
-        use State::*;
-        match b {
-            CAN | SUB => {
-                self.st = Ground;
-                VTAction::None
+            DcsIgnoreEsc => {
+                CAN | SUB => {
+                    self.st = Ground;
+                    VTAction::None
+                }
+                ST_FINAL => {
+                    self.st = Ground;
+                    VTAction::None
+                }
+                DEL => VTAction::None,
+                ESC => VTAction::None,
+                _ => {
+                    self.st = DcsIgnore;
+                    VTAction::None
+                }
             }
-            DEL => VTAction::None,
-            ESC => {
-                self.st = DcsIgnoreEsc;
-                VTAction::None
+            DcsPassthrough => {
+                CAN | SUB => {
+                    self.st = Ground;
+                    VTAction::Cancel(VTEmit::Dcs)
+                }
+                DEL => VTAction::None,
+                ESC => {
+                    self.st = DcsEsc;
+                    VTAction::Hold(VTEmit::Dcs)
+                }
+                _ => VTAction::Buffer(VTEmit::Dcs),
             }
-            _ => VTAction::None,
-        }
-    }
-
-    fn on_dcs_ignore_esc(&mut self, b: u8) -> VTAction {
-        use State::*;
-        match b {
-            CAN | SUB => {
-                self.st = Ground;
-                VTAction::None
+            DcsEsc => {
+                ST_FINAL => {
+                    self.st = Ground;
+                    VTAction::End(VTEnd::Dcs)
+                }
+                DEL => VTAction::None,
+                ESC => {
+                    // If we get ESC ESC, we need to yield the previous ESC as well.
+                    VTAction::Hold(VTEmit::Dcs)
+                }
+                _ => {
+                    // If we get ESC !ST, we need to yield the previous ESC as well.
+                    self.st = DcsPassthrough;
+                    VTAction::Buffer(VTEmit::Dcs)
+                }
             }
-            ST_FINAL => {
-                self.st = Ground;
-                VTAction::None
+            OscString => {
+                CAN | SUB => {
+                    self.st = Ground;
+                    VTAction::Cancel(VTEmit::Osc)
+                }
+                DEL => VTAction::None,
+                BEL => {
+                    self.st = Ground;
+                    VTAction::End(VTEnd::Osc { used_bel: true })
+                }
+                ESC => {
+                    self.st = OscEsc;
+                    VTAction::Hold(VTEmit::Osc)
+                }
+                p if is_printable(p) => VTAction::Buffer(VTEmit::Osc),
+                _ => VTAction::None, // ignore other C0
             }
-            DEL => VTAction::None,
-            ESC => VTAction::None,
-            _ => {
-                self.st = DcsIgnore;
-                VTAction::None
+            OscEsc => {
+                ST_FINAL => {
+                    self.st = Ground;
+                    VTAction::End(VTEnd::Osc { used_bel: false })
+                } // ST
+                ESC => VTAction::Hold(VTEmit::Osc),
+                DEL => VTAction::None,
+                _ => {
+                    self.st = OscString;
+                    VTAction::Buffer(VTEmit::Osc)
+                }
             }
-        }
-    }
-
-    fn on_dcs_pass(&mut self, b: u8) -> VTAction {
-        use State::*;
-        match b {
-            CAN | SUB => {
-                self.st = Ground;
-                VTAction::Cancel(VTEmit::Dcs)
+            SosPmApcString => {
+                CAN | SUB => {
+                    self.st = Ground;
+                    VTAction::None
+                }
+                DEL => VTAction::None,
+                ESC => {
+                    self.st = SpaEsc;
+                    VTAction::None
+                }
+                _ => VTAction::None,
             }
-            DEL => VTAction::None,
-            ESC => {
-                self.st = DcsEsc;
-                VTAction::Hold(VTEmit::Dcs)
-            }
-            _ => VTAction::Buffer(VTEmit::Dcs),
-        }
-    }
-
-    fn on_dcs_esc(&mut self, b: u8) -> VTAction {
-        use State::*;
-        match b {
-            ST_FINAL => {
-                self.st = Ground;
-                VTAction::End(VTEnd::Dcs)
-            }
-            DEL => VTAction::None,
-            ESC => {
-                // If we get ESC ESC, we need to yield the previous ESC as well.
-                VTAction::Hold(VTEmit::Dcs)
-            }
-            _ => {
-                // If we get ESC !ST, we need to yield the previous ESC as well.
-                self.st = DcsPassthrough;
-                VTAction::Buffer(VTEmit::Dcs)
-            }
-        }
-    }
-
-    // ---- OSC
-    fn on_osc_string(&mut self, b: u8) -> VTAction {
-        use State::*;
-        match b {
-            CAN | SUB => {
-                self.st = Ground;
-                VTAction::Cancel(VTEmit::Osc)
-            }
-            DEL => VTAction::None,
-            BEL => {
-                self.st = Ground;
-                VTAction::End(VTEnd::Osc { used_bel: true })
-            }
-            ESC => {
-                self.st = OscEsc;
-                VTAction::Hold(VTEmit::Osc)
-            }
-            p if is_printable(p) => VTAction::Buffer(VTEmit::Osc),
-            _ => VTAction::None, // ignore other C0
-        }
-    }
-
-    fn on_osc_esc(&mut self, b: u8) -> VTAction {
-        use State::*;
-        match b {
-            ST_FINAL => {
-                self.st = Ground;
-                VTAction::End(VTEnd::Osc { used_bel: false })
-            } // ST
-            ESC => VTAction::Hold(VTEmit::Osc),
-            DEL => VTAction::None,
-            _ => {
-                self.st = OscString;
-                VTAction::Buffer(VTEmit::Osc)
-            }
-        }
-    }
-
-    // ---- SOS/PM/APC (ignored payload)
-    fn on_spa_string(&mut self, b: u8) -> VTAction {
-        use State::*;
-        match b {
-            CAN | SUB => {
-                self.st = Ground;
-                VTAction::None
-            }
-            DEL => VTAction::None,
-            ESC => {
-                self.st = SpaEsc;
-                VTAction::None
-            }
-            _ => VTAction::None,
-        }
-    }
-
-    fn on_spa_esc(&mut self, b: u8) -> VTAction {
-        use State::*;
-        match b {
-            ST_FINAL => {
-                self.st = Ground;
-                VTAction::None
-            }
-            DEL => VTAction::None,
-            ESC => {
-                /* remain */
-                VTAction::None
-            }
-            _ => {
-                self.st = State::SosPmApcString;
-                VTAction::None
+            SpaEsc => {
+                ST_FINAL => {
+                    self.st = Ground;
+                    VTAction::None
+                }
+                DEL => VTAction::None,
+                ESC => {
+                    /* remain */
+                    VTAction::None
+                }
+                _ => {
+                    self.st = State::SosPmApcString;
+                    VTAction::None
+                }
             }
         }
     }
@@ -1746,14 +1681,14 @@ mod tests {
             parser.feed_with(test_bytes, |event: VTEvent| {
                 let mut chunk = [0_u8; 3];
                 let b = event.encode(&mut chunk).unwrap_or_else(|_| {
-                    panic!("Failed to encode event {test_bytes:X?} -> {event:?}")
+                    panic!("Failed to encode event {test_bytes:02X?} -> {event:?}")
                 });
                 bytes.extend_from_slice(&chunk[..b]);
             });
             if let Some(event) = parser.idle() {
                 let mut chunk = [0_u8; 3];
                 let b = event.encode(&mut chunk).unwrap_or_else(|_| {
-                    panic!("Failed to encode event {test_bytes:X?} -> {event:?}")
+                    panic!("Failed to encode event {test_bytes:02X?} -> {event:?}")
                 });
                 bytes.extend_from_slice(&chunk[..b]);
             }
@@ -1766,7 +1701,7 @@ mod tests {
                 if let Some(event) = parser.idle() {
                     eprintln!("{event:?}");
                 }
-                assert_eq!(bytes, test_bytes, "{test_bytes:X?} -> {bytes:X?}");
+                assert_eq!(bytes, test_bytes, "{test_bytes:02X?} -> {bytes:02X?}");
             }
         }
     }
