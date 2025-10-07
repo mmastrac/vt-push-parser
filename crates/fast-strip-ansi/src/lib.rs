@@ -7,7 +7,7 @@ use vt_push_parser::{VT_PARSER_INTEREST_NONE, VTPushParser};
 
 /// Strip ANSI escape sequences from a string. If the input contains no ANSI
 /// escape sequences, the input is returned as-is.
-pub fn strip_ansi_string(s: &str) -> Cow<str> {
+pub fn strip_ansi_string(s: &str) -> Cow<'_, str> {
     let mut output = Cow::Borrowed(s);
     let mut parser = VTPushParser::new_with_interest::<VT_PARSER_INTEREST_NONE>();
     parser.feed_with(s.as_bytes(), |event: VTEvent| {
@@ -33,7 +33,7 @@ pub fn strip_ansi_string(s: &str) -> Cow<str> {
 
 /// Strip ANSI escape sequences from a byte slice. If the input contains no
 /// ANSI escape sequences, the input is returned as-is.
-pub fn strip_ansi_bytes(s: &[u8]) -> Cow<[u8]> {
+pub fn strip_ansi_bytes(s: &[u8]) -> Cow<'_, [u8]> {
     let mut output = Cow::Borrowed(s);
     let mut parser = VTPushParser::new_with_interest::<VT_PARSER_INTEREST_NONE>();
     parser.feed_with(s, |event: VTEvent| {

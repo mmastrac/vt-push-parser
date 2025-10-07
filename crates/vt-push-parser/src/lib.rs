@@ -701,7 +701,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
-    fn emit_csi(&mut self, final_byte: u8) -> VTAction {
+    fn emit_csi(&mut self, final_byte: u8) -> VTAction<'_> {
         self.finish_params_if_any();
 
         // Build borrowed views into self.params
@@ -719,7 +719,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }))
     }
 
-    fn dcs_start(&mut self, final_byte: u8) -> VTAction {
+    fn dcs_start(&mut self, final_byte: u8) -> VTAction<'_> {
         self.finish_params_if_any();
 
         let privp = self.priv_prefix.take();
@@ -737,7 +737,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
     // State handlers
     // =====================
 
-    fn push_with(&mut self, b: u8) -> VTAction {
+    fn push_with(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
 
         macro_rules! state_machine {
@@ -746,7 +746,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                     $(if $( $if_ident:ident $( ($call_ident:ident) )? $( == $literal:literal)? $(||)? )+)?
                     => $block:expr $(,)? )* }
             )*) => {
-                #[allow(unused)]
+                #[allow(unused, clippy::redundant_pattern)]
                 match self.st {
                     $(
                         $state => {

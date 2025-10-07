@@ -433,7 +433,7 @@ impl<'a> std::fmt::Debug for VTEvent<'a> {
 }
 
 impl<'a> VTEvent<'a> {
-    pub fn csi(&self) -> Option<CSI> {
+    pub fn csi(&self) -> Option<CSI<'a>> {
         match self {
             VTEvent::Csi(csi) => Some(CSI {
                 private: csi.private,
