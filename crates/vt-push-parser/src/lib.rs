@@ -155,6 +155,11 @@ const fn is_c0(b: u8) -> bool {
     b <= 0x1F && b != b'\r' && b != b'\n' && b != b'\t'
 }
 #[inline]
+const fn is_any_c0(b: u8) -> bool {
+    // Control characters, with the exception of the common whitespace controls.
+    b <= 0x1F
+}
+#[inline]
 fn is_printable(b: u8) -> bool {
     (0x20..=0x7E).contains(&b)
 }
@@ -1010,6 +1015,8 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                 self.st = Escape;
                 VTAction::None
             }
+            // Weird case: if we encounter C0 inside of CSI, emit it while we parse.
+            c if is_any_c0(c) => VTAction::Event(VTEvent::C0(c)),
             c if is_priv(c) => {
                 self.priv_prefix = Some(c);
                 self.st = CsiParam;
@@ -1061,6 +1068,8 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                 self.st = Escape;
                 VTAction::None
             }
+            // Weird case: if we encounter C0 inside of CSI, emit it while we parse.
+            c if is_any_c0(c) => VTAction::Event(VTEvent::C0(c)),
             d if is_digit(d) => {
                 self.cur_param.push(d);
                 VTAction::None
@@ -1104,6 +1113,8 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                 self.st = Escape;
                 VTAction::None
             }
+            // Weird case: if we encounter C0 inside of CSI, emit it while we parse.
+            c if is_any_c0(c) => VTAction::Event(VTEvent::C0(c)),
             c if is_intermediate(c) => {
                 if self.ints.push(c) {
                     self.st = CsiInt;

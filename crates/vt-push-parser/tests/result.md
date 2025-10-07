@@ -102,6 +102,20 @@ Csi('3:1', '2', '3', '4', '5', '', 'm')
 Csi(' ', 'M')
 ```
 ---
+## CSI: Escape with invalid intermediate control character (emits C0 before CSI, weird case)
+```
+<ESC>[<CR> M<ESC>[ <CR>M<ESC>[1;<CR>1M
+```
+
+```
+C0(0d)
+Csi(' ', 'M')
+C0(0d)
+Csi(' ', 'M')
+C0(0d)
+Csi('1', '1', '', 'M')
+```
+---
 ## OSC: Two OSC in a row
 ```
 <ESC>]1;<ESC>\<ESC>]1;<ESC>\

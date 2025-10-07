@@ -22,6 +22,8 @@ Hello<DEL>World
 <ESC>[3:1;2;3;4;5m
 # CSI: Cursor up with intermediate space character (final M)
 <ESC>[ M
+# CSI: Escape with invalid intermediate control character (emits C0 before CSI, weird case)
+<ESC>[<CR> M<ESC>[ <CR>M<ESC>[1;<CR>1M
 
 # OSC: Two OSC in a row
 <ESC>]1;<ESC>\<ESC>]1;<ESC>\
