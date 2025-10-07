@@ -2,6 +2,17 @@
 
 use crate::{VT_PARSER_INTEREST_DEFAULT, VTEvent, VTPushParser};
 
+pub trait VTInputCaptureCallback {
+    fn event(&mut self, event: VTCaptureEvent<'_>) -> VTInputCapture;
+}
+
+impl<F: FnMut(VTCaptureEvent<'_>) -> VTInputCapture> VTInputCaptureCallback for F {
+    #[inline(always)]
+    fn event(&mut self, event: VTCaptureEvent<'_>) -> VTInputCapture {
+        self(event)
+    }
+}
+
 /// The type of capture mode to use after this event has been emitted.
 ///
 /// The data will be emitted as a [`VTInputEvent::Captured`] event.
@@ -161,45 +172,47 @@ impl<const INTEREST: u8> VTCapturePushParser<INTEREST> {
         self.parser.idle().map(VTCaptureEvent::VTEvent)
     }
 
-    pub fn feed_with<'this, 'input, F: for<'any> FnMut(VTCaptureEvent<'any>) -> VTInputCapture>(
+    pub fn feed_with<'this, 'input, F: VTInputCaptureCallback>(
         &'this mut self,
         mut input: &'input [u8],
-        cb: &mut F,
+        mut cb: F,
     ) {
         while !input.is_empty() {
             match &mut self.capture {
                 VTCaptureInternal::None => {
                     // Normal parsing mode - feed to the underlying parser
-                    let count = self.parser.feed_with_abortable(input, &mut |event| {
-                        let capture_mode = cb(VTCaptureEvent::VTEvent(event));
-                        match capture_mode {
-                            VTInputCapture::None => {
-                                // Stay in normal mode
+                    let count = self
+                        .parser
+                        .feed_with_abortable(input, &mut |event: VTEvent| {
+                            let capture_mode = cb.event(VTCaptureEvent::VTEvent(event));
+                            match capture_mode {
+                                VTInputCapture::None => {
+                                    // Stay in normal mode
+                                }
+                                VTInputCapture::Count(count) => {
+                                    self.capture = VTCaptureInternal::Count(count);
+                                }
+                                VTInputCapture::CountUtf8(count) => {
+                                    self.capture = VTCaptureInternal::CountUtf8(count);
+                                }
+                                VTInputCapture::Terminator(terminator) => {
+                                    self.capture = VTCaptureInternal::Terminator(terminator, 0);
+                                }
                             }
-                            VTInputCapture::Count(count) => {
-                                self.capture = VTCaptureInternal::Count(count);
-                            }
-                            VTInputCapture::CountUtf8(count) => {
-                                self.capture = VTCaptureInternal::CountUtf8(count);
-                            }
-                            VTInputCapture::Terminator(terminator) => {
-                                self.capture = VTCaptureInternal::Terminator(terminator, 0);
-                            }
-                        }
-                        false // Don't abort parsing
-                    });
+                            false // Don't abort parsing
+                        });
 
                     input = &input[count..];
                 }
                 capture => {
                     // Capture mode - collect data until capture is complete
                     if let Some(captured_data) = capture.feed(&mut input) {
-                        cb(VTCaptureEvent::Capture(captured_data));
+                        cb.event(VTCaptureEvent::Capture(captured_data));
                     }
 
                     // Check if capture is complete
                     if matches!(self.capture, VTCaptureInternal::None) {
-                        cb(VTCaptureEvent::CaptureEnd);
+                        cb.event(VTCaptureEvent::CaptureEnd);
                     }
                 }
             }
@@ -215,19 +228,22 @@ mod tests {
     fn test_capture_paste() {
         let mut output = String::new();
         let mut parser = VTCapturePushParser::new();
-        parser.feed_with(b"raw\x1b[200~paste\x1b[201~raw", &mut |event| {
-            output.push_str(&format!("{event:?}\n"));
-            match event {
-                VTCaptureEvent::VTEvent(VTEvent::Csi(csi)) => {
-                    if csi.params.try_parse::<usize>(0).unwrap_or(0) == 200 {
-                        VTInputCapture::Terminator(b"\x1b[201~")
-                    } else {
-                        VTInputCapture::None
+        parser.feed_with(
+            b"raw\x1b[200~paste\x1b[201~raw",
+            &mut |event: VTCaptureEvent| {
+                output.push_str(&format!("{event:?}\n"));
+                match event {
+                    VTCaptureEvent::VTEvent(VTEvent::Csi(csi)) => {
+                        if csi.params.try_parse::<usize>(0).unwrap_or(0) == 200 {
+                            VTInputCapture::Terminator(b"\x1b[201~")
+                        } else {
+                            VTInputCapture::None
+                        }
                     }
+                    _ => VTInputCapture::None,
                 }
-                _ => VTInputCapture::None,
-            }
-        });
+            },
+        );
         assert_eq!(
             output.trim(),
             r#"
@@ -245,7 +261,7 @@ VTEvent(Raw('raw'))
     fn test_capture_count() {
         let mut output = String::new();
         let mut parser = VTCapturePushParser::new();
-        parser.feed_with(b"raw\x1b[Xpaste\x1b[Yraw", &mut |event| {
+        parser.feed_with(b"raw\x1b[Xpaste\x1b[Yraw", &mut |event: VTCaptureEvent| {
             output.push_str(&format!("{event:?}\n"));
             match event {
                 VTCaptureEvent::VTEvent(VTEvent::Csi(csi)) => {
@@ -276,7 +292,7 @@ VTEvent(Raw('raw'))
     fn test_capture_count_utf8_but_ascii() {
         let mut output = String::new();
         let mut parser = VTCapturePushParser::new();
-        parser.feed_with(b"raw\x1b[Xpaste\x1b[Yraw", &mut |event| {
+        parser.feed_with(b"raw\x1b[Xpaste\x1b[Yraw", &mut |event: VTCaptureEvent| {
             output.push_str(&format!("{event:?}\n"));
             match event {
                 VTCaptureEvent::VTEvent(VTEvent::Csi(csi)) => {
@@ -308,7 +324,7 @@ VTEvent(Raw('raw'))
         let mut output = String::new();
         let mut parser = VTCapturePushParser::new();
         let input = "raw\u{001b}[X🤖🦕✅😀🕓\u{001b}[Yraw".as_bytes();
-        parser.feed_with(input, &mut |event| {
+        parser.feed_with(input, &mut |event: VTCaptureEvent| {
             output.push_str(&format!("{event:?}\n"));
             match event {
                 VTCaptureEvent::VTEvent(VTEvent::Csi(csi)) => {
@@ -336,21 +352,24 @@ VTEvent(Raw('raw'))
         let mut output = String::new();
         let mut parser = VTCapturePushParser::new();
 
-        parser.feed_with(b"start\x1b[200~part\x1b[201ial\x1b[201~end", &mut |event| {
-            output.push_str(&format!("{event:?}\n"));
-            match event {
-                VTCaptureEvent::VTEvent(VTEvent::Csi(csi)) => {
-                    if csi.final_byte == b'~'
-                        && csi.params.try_parse::<usize>(0).unwrap_or(0) == 200
-                    {
-                        VTInputCapture::Terminator(b"\x1b[201~")
-                    } else {
-                        VTInputCapture::None
+        parser.feed_with(
+            b"start\x1b[200~part\x1b[201ial\x1b[201~end",
+            &mut |event: VTCaptureEvent| {
+                output.push_str(&format!("{event:?}\n"));
+                match event {
+                    VTCaptureEvent::VTEvent(VTEvent::Csi(csi)) => {
+                        if csi.final_byte == b'~'
+                            && csi.params.try_parse::<usize>(0).unwrap_or(0) == 200
+                        {
+                            VTInputCapture::Terminator(b"\x1b[201~")
+                        } else {
+                            VTInputCapture::None
+                        }
                     }
+                    _ => VTInputCapture::None,
                 }
-                _ => VTInputCapture::None,
-            }
-        });
+            },
+        );
 
         assert_eq!(
             output.trim(),
@@ -379,7 +398,7 @@ VTEvent(Raw('end'))"#
         let mut parser = VTCapturePushParser::new();
         let mut captured = Vec::new();
         for chunk in input.chunks(chunk_size) {
-            parser.feed_with(chunk, &mut |event| {
+            parser.feed_with(chunk, &mut |event: VTCaptureEvent| {
                 output.push_str(&format!("{event:?}\n"));
                 match event {
                     VTCaptureEvent::Capture(data) => {

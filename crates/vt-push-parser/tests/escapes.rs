@@ -169,7 +169,7 @@ fn test(output: &mut String, test_name: &str, line: &str, decoded: &[u8]) {
 
     let mut text_content_interest_none = String::new();
     let mut parser = VTPushParser::new_with_interest::<{ VT_PARSER_INTEREST_NONE }>();
-    parser.feed_with(&text_test, &mut |event| {
+    parser.feed_with(&text_test, &mut |event: VTEvent| {
         if let VTEvent::Raw(s) = event {
             text_content_interest_none.push_str(String::from_utf8_lossy(s).as_ref())
         }

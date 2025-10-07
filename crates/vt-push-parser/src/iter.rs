@@ -1,6 +1,9 @@
 //! Iterator wrapper around [`VTPushParser`].
 
-use crate::{VTPushParser, event::VTOwnedEvent};
+use crate::{
+    VTPushParser,
+    event::{VTEvent, VTOwnedEvent},
+};
 
 /// A convenience wrapper around [`VTPushParser`] that implements [`Iterator`]
 /// for any `Iterator` of `AsRef<[u8]>`.
@@ -41,7 +44,7 @@ where
     fn next(&mut self) -> Option<Self::Item> {
         while self.events.is_empty() {
             if let Some(next) = self.iter.next() {
-                self.parser.feed_with(next.as_ref(), &mut |event| {
+                self.parser.feed_with(next.as_ref(), &mut |event: VTEvent| {
                     self.events.push(event.to_owned());
                 });
             } else {

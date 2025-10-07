@@ -5,10 +5,11 @@
 //!
 //! ```rust
 //! use vt_push_parser::VTPushParser;
+//! use vt_push_parser::event::VTEvent;
 //!
 //! let mut parser = VTPushParser::new();
 //! let mut output = String::new();
-//! parser.feed_with(b"\x1b[32mHello, world!\x1b[0m", &mut |event| {
+//! parser.feed_with(b"\x1b[32mHello, world!\x1b[0m", &mut |event: VTEvent| {
 //!     output.push_str(&format!("{:?}", event));
 //! });
 //! assert_eq!(output, "Csi('32', '', 'm')Raw('Hello, world!')Csi('0', '', 'm')");
@@ -64,6 +65,51 @@ const SOS: u8 = b'X';
 const ST_FINAL: u8 = b'\\';
 
 use crate::event::{Param, ParamBuf, Params};
+
+/// Receives a single [`VTEvent`].
+#[allow(private_bounds)]
+pub trait VTEventCallback: VTEventCallbackMaybeAbortable<()> {
+    fn event(&mut self, event: VTEvent<'_>) -> ();
+}
+
+impl<T: FnMut(VTEvent<'_>)> VTEventCallback for T {
+    #[inline(always)]
+    fn event(&mut self, event: VTEvent<'_>) -> () {
+        self(event)
+    }
+}
+
+impl<T: VTEventCallback> VTEventCallbackMaybeAbortable<()> for T {
+    #[inline(always)]
+    fn event(&mut self, event: VTEvent<'_>) -> () {
+        VTEventCallback::event(self, event)
+    }
+}
+
+/// Receives a single [`VTEvent`], returning a boolean indicating whether to
+/// continue parsing (`true`) or stop parsing (`false`).
+#[allow(private_bounds)]
+pub trait VTEventCallbackAbortable: VTEventCallbackMaybeAbortable<bool> {
+    fn event(&mut self, event: VTEvent<'_>) -> bool;
+}
+
+impl<T: VTEventCallbackAbortable> VTEventCallbackMaybeAbortable<bool> for T {
+    #[inline(always)]
+    fn event(&mut self, event: VTEvent<'_>) -> bool {
+        VTEventCallbackAbortable::event(self, event)
+    }
+}
+
+impl<T: FnMut(VTEvent<'_>) -> bool> VTEventCallbackAbortable for T {
+    #[inline(always)]
+    fn event(&mut self, event: VTEvent<'_>) -> bool {
+        self(event)
+    }
+}
+
+trait VTEventCallbackMaybeAbortable<R: MaybeAbortable> {
+    fn event<'e>(&mut self, event: VTEvent<'e>) -> R;
+}
 
 /// The action to take with the most recently accumulated byte.
 enum VTAction<'a> {
@@ -330,17 +376,49 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
     /// Feed bytes into the parser. This is the main entry point for the parser.
     /// It will call the callback with events as they are emitted.
     ///
-    /// The callback must be valid for the lifetime of the `feed_with` call.
+    /// The [`VTEventCallback`] callback must be valid for the lifetime of the
+    /// `feed_with` call. The [`VTEventCallback`] trait is implemented for all
+    /// function pointers and closures, as well as mutable references to them.
     ///
-    /// The callback may emit any number of events (including zero), depending
+    /// This function may emit any number of events (including zero), depending
     /// on the state of the internal parser.
+    ///
+    /// ## With a closure
+    ///
+    /// ```rust
+    /// use vt_push_parser::{VTPushParser, event::VTEvent};
+    ///
+    /// let mut parser = VTPushParser::new();
+    /// parser.feed_with(b"\x1b[32mHello, world!\x1b[0m", |event: VTEvent| {
+    ///     println!("{:?}", event);
+    /// });
+    /// ```
+    ///
+    /// ## With a custom callback
+    ///
+    /// ```rust
+    /// use vt_push_parser::{VTPushParser, VTEventCallback, event::VTEvent};
+    ///
+    /// struct MyCallback {
+    ///     output: String,
+    /// }
+    ///
+    /// impl VTEventCallback for MyCallback {
+    ///     fn event(&mut self, event: VTEvent) {
+    ///         self.output.push_str(&format!("{:?}", event));
+    ///     }
+    /// }
+    ///
+    /// let mut parser = VTPushParser::new();
+    /// parser.feed_with(b"\x1b[32mHello, world!\x1b[0m", MyCallback { output: String::new() });
+    /// ```
     #[inline]
-    pub fn feed_with<'this, 'input, F: for<'any> FnMut(VTEvent<'any>)>(
+    pub fn feed_with<'this, 'input, F: VTEventCallback>(
         &'this mut self,
         input: &'input [u8],
-        cb: &mut F,
+        mut cb: F,
     ) {
-        self.feed_with_internal(input, cb);
+        self.feed_with_internal(input, &mut cb);
     }
 
     /// Feed bytes into the parser. This is the main entry point for the parser.
@@ -356,21 +434,16 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
     /// This function returns the number of bytes processed. Note that some
     /// bytes may have been processed any not emitted.
     #[inline]
-    pub fn feed_with_abortable<'this, 'input, F: for<'any> FnMut(VTEvent<'any>) -> bool>(
+    pub fn feed_with_abortable<'this, 'input, F: VTEventCallbackAbortable>(
         &'this mut self,
         input: &'input [u8],
-        cb: &mut F,
+        mut cb: F,
     ) -> usize {
-        self.feed_with_internal(input, cb)
+        self.feed_with_internal(input, &mut cb)
     }
 
     #[inline(always)]
-    fn feed_with_internal<
-        'this,
-        'input,
-        R: MaybeAbortable,
-        F: for<'any> FnMut(VTEvent<'any>) -> R,
-    >(
+    fn feed_with_internal<'this, 'input, R: MaybeAbortable, F: VTEventCallbackMaybeAbortable<R>>(
         &'this mut self,
         input: &'input [u8],
         cb: &mut F,
@@ -401,8 +474,8 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                     if $end {
                         if match emit {
                             VTEmit::Ground => unreachable!(),
-                            VTEmit::Dcs => $cb(VTEvent::DcsEnd(&input[range])),
-                            VTEmit::Osc => $cb(VTEvent::OscEnd {
+                            VTEmit::Dcs => $cb.event(VTEvent::DcsEnd(&input[range])),
+                            VTEmit::Osc => $cb.event(VTEvent::OscEnd {
                                 data: &input[range],
                                 used_bel: $used_bel,
                             }),
@@ -413,9 +486,9 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                         }
                     } else if range.len() > 0 {
                         if match emit {
-                            VTEmit::Ground => $cb(VTEvent::Raw(&input[range])),
-                            VTEmit::Dcs => $cb(VTEvent::DcsData(&input[range])),
-                            VTEmit::Osc => $cb(VTEvent::OscData(&input[range])),
+                            VTEmit::Ground => $cb.event(VTEvent::Raw(&input[range])),
+                            VTEmit::Dcs => $cb.event(VTEvent::DcsData(&input[range])),
+                            VTEmit::Osc => $cb.event(VTEvent::OscData(&input[range])),
                         }
                         .abort()
                         {
@@ -435,7 +508,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                 let start = i;
                 loop {
                     if i >= input.len() {
-                        cb(VTEvent::Raw(&input[start..]));
+                        cb.event(VTEvent::Raw(&input[start..]));
                         return input.len();
                     }
                     if ENDS_GROUND[input[i] as usize] {
@@ -444,7 +517,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                     i += 1;
                 }
 
-                if start != i && cb(VTEvent::Raw(&input[start..i])).abort() {
+                if start != i && cb.event(VTEvent::Raw(&input[start..i])).abort() {
                     return i;
                 }
 
@@ -486,9 +559,9 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                         let range = state.buffer_idx..(i - state.hold as usize);
                         if !range.is_empty()
                             && match emit {
-                                VTEmit::Ground => cb(VTEvent::Raw(&input[range])),
-                                VTEmit::Dcs => cb(VTEvent::DcsData(&input[range])),
-                                VTEmit::Osc => cb(VTEvent::OscData(&input[range])),
+                                VTEmit::Ground => cb.event(VTEvent::Raw(&input[range])),
+                                VTEmit::Dcs => cb.event(VTEvent::DcsData(&input[range])),
+                                VTEmit::Osc => cb.event(VTEvent::OscData(&input[range])),
                             }
                             .abort()
                         {
@@ -504,7 +577,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                     }
                 }
                 VTAction::Event(e) => {
-                    if cb(e).abort() {
+                    if cb.event(e).abort() {
                         return i + 1;
                     }
                 }
@@ -520,9 +593,9 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                     if state.current_emit.is_none()
                         && let Some(h) = held_byte.take()
                         && match emit {
-                            VTEmit::Ground => cb(VTEvent::Raw(&[h])),
-                            VTEmit::Dcs => cb(VTEvent::DcsData(&[h])),
-                            VTEmit::Osc => cb(VTEvent::OscData(&[h])),
+                            VTEmit::Ground => cb.event(VTEvent::Raw(&[h])),
+                            VTEmit::Dcs => cb.event(VTEvent::DcsData(&[h])),
+                            VTEmit::Osc => cb.event(VTEvent::OscData(&[h])),
                         }
                         .abort()
                     {
@@ -546,8 +619,8 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                     state.hold = false;
                     if match emit {
                         VTEmit::Ground => unreachable!(),
-                        VTEmit::Dcs => cb(VTEvent::DcsCancel),
-                        VTEmit::Osc => cb(VTEvent::OscCancel),
+                        VTEmit::Dcs => cb.event(VTEvent::DcsCancel),
+                        VTEmit::Osc => cb.event(VTEvent::OscCancel),
                     }
                     .abort()
                     {
@@ -567,9 +640,9 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
             let range = &input[state.buffer_idx..input.len() - state.hold as usize];
             if !range.is_empty() {
                 match emit {
-                    VTEmit::Ground => cb(VTEvent::Raw(range)),
-                    VTEmit::Dcs => cb(VTEvent::DcsData(range)),
-                    VTEmit::Osc => cb(VTEvent::OscData(range)),
+                    VTEmit::Ground => cb.event(VTEvent::Raw(range)),
+                    VTEmit::Dcs => cb.event(VTEvent::DcsData(range)),
+                    VTEmit::Osc => cb.event(VTEvent::OscData(range)),
                 };
             }
         };
@@ -1478,14 +1551,14 @@ mod tests {
     fn collect_events(input: &[u8]) -> Vec<String> {
         let mut out = Vec::new();
         let mut p = VTPushParser::new();
-        p.feed_with(input, &mut |ev| out.push(format!("{ev:?}")));
+        p.feed_with(input, |ev: VTEvent| out.push(format!("{ev:?}")));
         out
     }
 
     fn collect_owned_events(input: &[u8]) -> Vec<VTOwnedEvent> {
         let mut out = Vec::new();
         let mut p = VTPushParser::new();
-        p.feed_with(input, &mut |ev| out.push(ev.to_owned()));
+        p.feed_with(input, &mut |ev: VTEvent| out.push(ev.to_owned()));
         out
     }
 
@@ -1558,7 +1631,7 @@ mod tests {
     fn collect_debug(input: &[u8]) -> Vec<String> {
         let mut out = Vec::new();
         let mut p = VTPushParser::new();
-        p.feed_with(input, &mut |ev| out.push(format!("{ev:?}")));
+        p.feed_with(input, |ev: VTEvent| out.push(format!("{ev:?}")));
         out
     }
 
@@ -1660,7 +1733,7 @@ mod tests {
             }
 
             let mut parser = VTPushParser::<VT_PARSER_INTEREST_ALL>::new_with();
-            parser.feed_with(test_bytes, &mut |event| {
+            parser.feed_with(test_bytes, |event: VTEvent| {
                 let mut chunk = [0_u8; 3];
                 let b = event.encode(&mut chunk).unwrap_or_else(|_| {
                     panic!("Failed to encode event {test_bytes:X?} -> {event:?}")
@@ -1677,7 +1750,7 @@ mod tests {
 
             if bytes.len() != 3 || bytes != test_bytes {
                 eprintln!("Failed to parse:");
-                parser.feed_with(test_bytes, &mut |event| {
+                parser.feed_with(test_bytes, |event: VTEvent| {
                     eprintln!("{event:?}");
                 });
                 if let Some(event) = parser.idle() {

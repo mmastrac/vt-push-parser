@@ -219,18 +219,27 @@ impl<'a> NumericParam<'a> {
     /// Try to parse the parameter as a single numeric value.
     pub fn sole(&self) -> Option<u16> {
         if !self.param.is_empty() && !self.param.contains(&b':') {
-            if let Some(s) = std::str::from_utf8(self.param).ok() {
-                if let Ok(n) = s.parse::<u16>() {
-                    Some(n)
-                } else {
-                    None
-                }
+            if let Ok(s) = std::str::from_utf8(self.param) {
+                s.parse::<u16>().ok()
             } else {
                 None
             }
         } else {
             None
         }
+    }
+
+    /// Try to parse the first parameter as a single numeric value.
+    pub fn first(&self) -> Option<u16> {
+        self.into_iter().next().flatten()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.param.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.param.iter().filter(|p| **p == b':').count() + 1
     }
 
     /// Try to write the parameters to the given buffer, returning the written
@@ -240,7 +249,7 @@ impl<'a> NumericParam<'a> {
     /// If the slice is not long enough, returns an error with the required
     /// length.
     pub fn try_write<'b>(&self, buf: &'b mut [u16]) -> Result<&'b [u16], usize> {
-        let len = self.param.into_iter().filter(|p| **p == b':').count() + 1;
+        let len = self.len();
         if buf.len() < len {
             return Err(buf.len());
         }
@@ -315,6 +324,18 @@ impl<'a> NumericParamBuf<'a> {
         self.params.get(index).map(|p| NumericParam {
             param: p.as_slice(),
         })
+    }
+
+    pub fn first(&self) -> Option<NumericParam<'a>> {
+        self.into_iter().next()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.params.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.params.len()
     }
 }
 
