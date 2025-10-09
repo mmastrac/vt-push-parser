@@ -704,10 +704,6 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
     fn emit_csi(&mut self, final_byte: u8) -> VTAction<'_> {
         self.finish_params_if_any();
 
-        // Build borrowed views into self.params
-        let mut borrowed: SmallVec<[&[u8]; 4]> = SmallVec::new();
-        borrowed.extend(self.params.iter().map(|v| v.as_slice()));
-
         let privp = self.priv_prefix.take();
         VTAction::Event(VTEvent::Csi(CSI {
             private: privp,

@@ -91,7 +91,9 @@ impl VTEscapeSignature {
         // TODO: const
         match entry {
             VTEvent::Esc(esc) => {
-                self.final_byte == esc.final_byte && self.intermediates.const_eq(&esc.intermediates)
+                self.prefix == 27
+                    && self.final_byte == esc.final_byte
+                    && self.intermediates.const_eq(&esc.intermediates)
             }
             VTEvent::Csi(csi) => {
                 self.prefix == CSI

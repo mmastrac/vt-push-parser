@@ -3,6 +3,7 @@
 macro_rules! ascii_control {
     ($(($variant:ident, $value:expr)),* $(,)?) => {
         /// ASCII control codes.
+        #[derive(Clone, Copy, PartialEq, Eq, Hash)]
         #[repr(u8)]
         pub enum AsciiControl {
             $( $variant = $value, )*
@@ -52,7 +53,7 @@ macro_rules! ascii_control {
             type Err = ();
             fn from_str(s: &str) -> Result<Self, Self::Err> {
                 $(
-                    if s.eq_ignore_ascii_case(stringify!($name)) {
+                    if s.eq_ignore_ascii_case(stringify!($variant)) {
                         return Ok(AsciiControl::$variant);
                     }
                 )*
@@ -204,6 +205,15 @@ pub fn encode_string(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_from_str() {
+        use std::str::FromStr;
+        assert_eq!(AsciiControl::from_str("ESC").unwrap(), AsciiControl::Esc);
+        assert_eq!(AsciiControl::from_str("CR").unwrap(), AsciiControl::Cr);
+        assert_eq!(AsciiControl::from_str("DEL").unwrap(), AsciiControl::Del);
+        assert!(AsciiControl::from_str("foo").is_err());
+    }
 
     #[test]
     fn test_decode_string_unclosed_control_sequence() {
