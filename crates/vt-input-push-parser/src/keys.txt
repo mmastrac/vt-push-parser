@@ -1,0 +1,364 @@
+// Irregular key and event sequences
+
+// https://vt100.net/docs/vt220-rm/chapter3.html
+// https://vt100.net/docs/vt510-rm/chapter8.html
+// https://invisible-island.net/xterm/ctlseqs/ctlseqs.pdf
+// https://invisible-island.net/xterm/xterm-function-keys.html
+// https://sw.kovidgoyal.net/kitty/keyboard-protocol/
+
+// // Default modifier (mode 0 or 1 -> base)
+// // No ambiguity here
+// $key: CSI 0 [ABCDEFGHPQRS]
+// $key: CSI 1 [ABCDEFGHPQRS]
+// 
+// // Standard (omits F3/R because of clash w/cursor position report)
+// $key($mod): CSI 1 ; $mod [ABCDEFGHPQS]
+// 
+// // Kitty or xterm modifyOtherKeys (2 param, formatOtherKeys = 1)
+// // eg: Shift-F5: CSI 15 ; 2 ~
+// $key($mod): CSI $n ; $mod [~u]
+// // Xterm "private" modifier, becomes unambiguous when > is used
+// $key($mod): CSI > $n ; $mod [~uABCDEFGHPQRS]
+// 
+// // xterm 3-param modifyOtherKeys (formatOtherKeys = 0)
+// // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h3-Alt-and-Meta-Keys
+// // eg: Alt-Tab: CSI 27 ; 3 ; 9 ~
+// $key($mod): CSI 27 ; $n ; $mod [~]
+
+// Irregular common control keys
+
+// Escapes are handled as a special case.
+//?? ESC: ESC
+//?? ESC(ALT): ESC ESC
+
+ESC: CSI 27 u
+
+// Disambiguation sequences. These are weak matches that may
+// only match if we're idle at the end of a sequence.
+?? 'N'(ALT): ESC N
+?? 'O'(ALT): ESC O
+?? 'P'(ALT): ESC P
+?? '?'(ALT): ESC ?
+?? '['(ALT): ESC [
+?? ']'(ALT): ESC ]
+
+ENTER: CR
+ENTER: LF
+ENTER: CSI 13 u
+ENTER(ALT): ESC CR
+ENTER(ALT): ESC LF
+
+BACKSPACE: DEL
+BACKSPACE: CSI 127 u
+BACKSPACE(CTRL): BS
+BACKSPACE(CTRL): CSI 8 u
+BACKSPACE(ALT): ESC DEL
+BACKSPACE(CTRL+ALT): ESC BS
+
+TAB: TAB
+TAB: CSI 9 u
+TAB(ALT): ESC TAB
+// Backtab is SHIFT-TAB and you can technically modify it
+TAB(SHIFT): CSI Z
+TAB(ALT+SHIFT): ESC CSI Z
+
+' ': SP
+' '(CTRL): NUL
+' '(ALT): ESC SP
+' '(CTRL+ALT): ESC NUL
+
+// Valid sequences that should never match, we abort if we see them
+// so they can be handled by the VT state machine.
+!: ESC =
+!: ESC <
+!: ESC >
+
+// Control characters represented by their primary ASCII code
+// though they may be produced by different sequences
+'a'(CTRL): <01>
+'b'(CTRL): <02>
+'c'(CTRL): <03>
+'d'(CTRL): <04>
+'e'(CTRL): <05>
+'f'(CTRL): <06>
+'g'(CTRL): <07>
+//'h'(CTRL): <08> // backspace
+//'i'(CTRL): <09> // tab
+//'j'(CTRL): <0a> // enter
+'k'(CTRL): <0b>
+'l'(CTRL): <0c>
+//'m'(CTRL): <0d> // enter (in raw mode)
+'n'(CTRL): <0e>
+'o'(CTRL): <0f>
+'p'(CTRL): <10>
+'q'(CTRL): <11>
+'r'(CTRL): <12>
+'s'(CTRL): <13>
+'t'(CTRL): <14>
+'u'(CTRL): <15>
+'v'(CTRL): <16>
+'w'(CTRL): <17>
+'x'(CTRL): <18>
+'y'(CTRL): <19>
+'z'(CTRL): <1a>
+// '['(CTRL): <1b> // escape key
+'\'(CTRL): <1c>
+']'(CTRL): <1d>
+'^'(CTRL): <1e>
+'_'(CTRL): <1f>
+
+'a'(CTRL+ALT): ESC <01>
+'b'(CTRL+ALT): ESC <02>
+'c'(CTRL+ALT): ESC <03>
+'d'(CTRL+ALT): ESC <04>
+'e'(CTRL+ALT): ESC <05>
+'f'(CTRL+ALT): ESC <06>
+'g'(CTRL+ALT): ESC <07>
+//'h'(CTRL+ALT): ESC <08> // backspace
+//'i'(CTRL+ALT): ESC <09> // tab
+//'j'(CTRL+ALT): ESC <0a> // enter
+'k'(CTRL+ALT): ESC <0b>
+'l'(CTRL+ALT): ESC <0c>
+//'m'(CTRL+ALT): ESC <0d> // enter (in raw mode)
+'n'(CTRL+ALT): ESC <0e>
+'o'(CTRL+ALT): ESC <0f>
+'p'(CTRL+ALT): ESC <10>
+'q'(CTRL+ALT): ESC <11>
+'r'(CTRL+ALT): ESC <12>
+'s'(CTRL+ALT): ESC <13>
+'t'(CTRL+ALT): ESC <14>
+'u'(CTRL+ALT): ESC <15>
+'v'(CTRL+ALT): ESC <16>
+'w'(CTRL+ALT): ESC <17>
+'x'(CTRL+ALT): ESC <18>
+'y'(CTRL+ALT): ESC <19>
+'z'(CTRL+ALT): ESC <1a>
+//'['(CTRL+ALT): ESC <1b> // escape key
+'\'(CTRL+ALT): ESC <1c>
+']'(CTRL+ALT): ESC <1d>
+'^'(CTRL+ALT): ESC <1e>
+'_'(CTRL+ALT): ESC <1f>
+
+// aka FIND
+HOME: CSI 1 ~
+INSERT: CSI 2 ~
+DELETE: CSI 3 ~
+// aka SELECT
+END: CSI 4 ~
+PAGE_UP: CSI 5 ~
+PAGE_DOWN: CSI 6 ~
+HOME: CSI 7 ~
+END: CSI 8 ~
+
+UP: CSI A
+UP: SS3 A
+DOWN: CSI B
+DOWN: SS3 B
+RIGHT: CSI C
+RIGHT: SS3 C
+LEFT: CSI D
+LEFT: SS3 D
+BEGIN: CSI E
+BEGIN: SS3 E
+END: CSI F
+END: SS3 F
+// https://en.wikipedia.org/wiki/ANSI_escape_code
+'5'(KEYPAD): CSI G
+'5'(KEYPAD): SS3 G
+HOME: CSI H
+HOME: SS3 H
+
+F1: SS3 P
+F1: CSI P
+F1: CSI 11 ~
+
+F2: SS3 Q
+F2: CSI Q
+F2: CSI 12 ~
+
+F3: SS3 R
+F3: CSI R
+F3: CSI 13 ~
+
+F4: SS3 S
+F4: CSI S
+F4: CSI 14 ~
+
+// VT52
+F1(VT52): ESC A
+F2(VT52): ESC B
+F3(VT52): ESC C
+F4(VT52): ESC D
+
+F5: CSI 15 ~
+F6: CSI 17 ~
+F7: CSI 18 ~
+F8: CSI 19 ~
+F9: CSI 20 ~
+F10: CSI 21 ~
+F11: CSI 23 ~
+F12: CSI 24 ~
+
+F13: CSI 25 ~
+F14: CSI 26 ~
+// aka help
+F15: CSI 28 ~
+// aka do/menu
+F16: CSI 29 ~
+F17: CSI 31 ~
+F18: CSI 32 ~
+F19: CSI 33 ~
+F20: CSI 34 ~
+
+// VT52 keypad mode
+'*'(KEYPAD+VT52): ESC ? j
+'+'(KEYPAD+VT52): ESC ? k
+','(KEYPAD+VT52): ESC ? l
+'-'(KEYPAD+VT52): ESC ? m
+'.'(KEYPAD+VT52): ESC ? n
+'/'(KEYPAD+VT52): ESC ? o
+'0'(KEYPAD+VT52): ESC ? p
+'1'(KEYPAD+VT52): ESC ? q
+'2'(KEYPAD+VT52): ESC ? r
+'3'(KEYPAD+VT52): ESC ? s
+'4'(KEYPAD+VT52): ESC ? t
+'5'(KEYPAD+VT52): ESC ? u
+'6'(KEYPAD+VT52): ESC ? v
+'7'(KEYPAD+VT52): ESC ? w
+'8'(KEYPAD+VT52): ESC ? x
+'9'(KEYPAD+VT52): ESC ? y
+TAB(KEYPAD+VT52): ESC ? I
+ENTER(KEYPAD+VT52): ESC ? M
+'='(KEYPAD+VT52): ESC ? X
+' '(KEYPAD+VT52): ESC ? SP
+
+// SS3 keypad
+'*'(KEYPAD): SS3 j
+'+'(KEYPAD): SS3 k
+','(KEYPAD): SS3 l
+'-'(KEYPAD): SS3 m
+'.'(KEYPAD): SS3 n
+'/'(KEYPAD): SS3 o
+'0'(KEYPAD): SS3 p
+'1'(KEYPAD): SS3 q
+'2'(KEYPAD): SS3 r
+'3'(KEYPAD): SS3 s
+'4'(KEYPAD): SS3 t
+'5'(KEYPAD): SS3 u
+'6'(KEYPAD): SS3 v
+'7'(KEYPAD): SS3 w
+'8'(KEYPAD): SS3 x
+'9'(KEYPAD): SS3 y
+TAB(KEYPAD): SS3 I
+ENTER(KEYPAD): SS3 M
+'='(KEYPAD): SS3 X
+' '(KEYPAD): SS3 SP
+
+// Sun function keys
+FIND(SUN): CSI 1 z
+INSERT(SUN): CSI 2 z
+DELETE(SUN): CSI 3 z
+SELECT(SUN): CSI 4 z
+PAGE_UP(SUN): CSI 216 z
+PAGE_DOWN(SUN): CSI 222 z
+HOME(SUN): CSI 214 z
+END(SUN): CSI 220 z
+BEGIN(SUN): CSI 218 z
+
+// aka help
+F15(SUN): CSI 196 z
+// aka do/menu
+F16(SUN): CSI 197 z
+
+// Kitty extended keypad
+'0'(KEYPAD): CSI 57399 u
+'1'(KEYPAD): CSI 57400 u
+'2'(KEYPAD): CSI 57401 u
+'3'(KEYPAD): CSI 57402 u
+'4'(KEYPAD): CSI 57403 u
+'5'(KEYPAD): CSI 57404 u
+'6'(KEYPAD): CSI 57405 u
+'7'(KEYPAD): CSI 57406 u
+'8'(KEYPAD): CSI 57407 u
+'9'(KEYPAD): CSI 57408 u
+'.'(KEYPAD): CSI 57409 u
+'/'(KEYPAD): CSI 57410 u
+'*'(KEYPAD): CSI 57411 u
+'-'(KEYPAD): CSI 57412 u
+'+'(KEYPAD): CSI 57413 u
+ENTER(KEYPAD): CSI 57414 u
+'='(KEYPAD): CSI 57415 u
+','(KEYPAD): CSI 57416 u
+LEFT(KEYPAD): CSI 57417 u
+RIGHT(KEYPAD): CSI 57418 u
+UP(KEYPAD): CSI 57419 u
+DOWN(KEYPAD): CSI 57420 u
+PAGE_UP(KEYPAD): CSI 57421 u
+PAGE_DOWN(KEYPAD): CSI 57422 u
+HOME(KEYPAD): CSI 57423 u
+END(KEYPAD): CSI 57424 u
+INSERT(KEYPAD): CSI 57425 u
+DELETE(KEYPAD): CSI 57426 u
+BEGIN(KEYPAD): CSI 57427 u
+
+// Kitty extended keys
+CAPS_LOCK: CSI 57358 u
+SCROLL_LOCK: CSI 57359 u
+NUM_LOCK: CSI 57360 u
+PRINT_SCREEN: CSI 57361 u
+PAUSE: CSI 57362 u
+MENU: CSI 57363 u
+F13: CSI 57376 u
+F14: CSI 57377 u
+F15: CSI 57378 u
+F16: CSI 57379 u
+F17: CSI 57380 u
+F18: CSI 57381 u
+F19: CSI 57382 u
+F20: CSI 57383 u
+F21: CSI 57384 u
+F22: CSI 57385 u
+F23: CSI 57386 u
+F24: CSI 57387 u
+F25: CSI 57388 u
+F26: CSI 57389 u
+F27: CSI 57390 u
+F28: CSI 57391 u
+F29: CSI 57392 u
+F30: CSI 57393 u
+F31: CSI 57394 u
+F32: CSI 57395 u
+F33: CSI 57396 u
+F34: CSI 57397 u
+F35: CSI 57398 u
+
+// Kitty media keys
+MEDIA_PLAY: CSI 57428 u
+MEDIA_PAUSE: CSI 57429 u
+MEDIA_PLAY_PAUSE: CSI 57430 u
+MEDIA_REVERSE: CSI 57431 u
+MEDIA_STOP: CSI 57432 u
+MEDIA_FAST_FORWARD: CSI 57433 u
+MEDIA_REWIND: CSI 57434 u
+MEDIA_TRACK_NEXT: CSI 57435 u
+MEDIA_TRACK_PREVIOUS: CSI 57436 u
+MEDIA_RECORD: CSI 57437 u
+MEDIA_LOWER_VOLUME: CSI 57438 u
+MEDIA_RAISE_VOLUME: CSI 57439 u
+MEDIA_MUTE_VOLUME: CSI 57440 u
+
+// Kitty modifier keys
+MODIFIER_LEFT_SHIFT: CSI 57441 u
+MODIFIER_LEFT_CONTROL: CSI 57442 u
+MODIFIER_LEFT_ALT: CSI 57443 u
+MODIFIER_LEFT_SUPER: CSI 57444 u
+MODIFIER_LEFT_HYPER: CSI 57445 u
+MODIFIER_LEFT_META: CSI 57446 u
+MODIFIER_RIGHT_SHIFT: CSI 57447 u
+MODIFIER_RIGHT_CONTROL: CSI 57448 u
+MODIFIER_RIGHT_ALT: CSI 57449 u
+MODIFIER_RIGHT_SUPER: CSI 57450 u
+MODIFIER_RIGHT_HYPER: CSI 57451 u
+MODIFIER_RIGHT_META: CSI 57452 u
+MODIFIER_ISO_LEVEL_3_SHIFT: CSI 57453 u
+MODIFIER_ISO_LEVEL_5_SHIFT: CSI 57454 u

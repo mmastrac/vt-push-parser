@@ -37,7 +37,13 @@ pub enum VTCaptureEvent<'a> {
     CaptureEnd,
 }
 
-enum VTCaptureInternal {
+/// The internal state of the capture parser.
+///
+/// This is not part of the public API and may change at any time.
+#[doc(hidden)]
+#[derive(Debug, Default)]
+pub enum VTCaptureInternal {
+    #[default]
     None,
     Count(usize),
     CountUtf8(usize),
@@ -45,7 +51,7 @@ enum VTCaptureInternal {
 }
 
 impl VTCaptureInternal {
-    fn feed<'a>(&mut self, input: &mut &'a [u8]) -> Option<&'a [u8]> {
+    pub fn feed<'a>(&mut self, input: &mut &'a [u8]) -> Option<&'a [u8]> {
         match self {
             VTCaptureInternal::None => None,
             VTCaptureInternal::Count(count) => {
