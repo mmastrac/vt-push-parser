@@ -92,19 +92,15 @@ fn decode_sequence(sequence: &str) -> Vec<u8> {
                 if part.starts_with('<') && part.ends_with('>') {
                     let ascii_control = part.trim_start_matches('<').trim_end_matches('>');
                     let hex = u8::from_str_radix(ascii_control, 16).unwrap();
-                    sequence_bytes.push(hex as u8);
+                    sequence_bytes.push(hex);
+                } else if let Ok(ascii_control) = AsciiControl::from_str(part) {
+                    sequence_bytes.push(ascii_control as u8);
+                } else if part.chars().all(|c| c.is_ascii_digit()) {
+                    sequence_bytes.extend_from_slice(part.as_bytes());
+                } else if part.len() == 1 {
+                    sequence_bytes.extend_from_slice(part.as_bytes());
                 } else {
-                    if let Ok(ascii_control) = AsciiControl::from_str(part) {
-                        sequence_bytes.push(ascii_control as u8);
-                    } else {
-                        if part.chars().all(|c| c.is_ascii_digit()) {
-                            sequence_bytes.extend_from_slice(part.as_bytes());
-                        } else if part.len() == 1 {
-                            sequence_bytes.extend_from_slice(part.as_bytes());
-                        } else {
-                            panic!("Invalid part: {part:?}");
-                        }
-                    }
+                    panic!("Invalid part: {part:?}");
                 }
             }
         }
@@ -178,7 +174,7 @@ fn generate_matcher_fn(
         if b.is_ascii_graphic() || b == b' ' {
             format!("b'{}'", b as char)
         } else {
-            format!("{:#04x}", b)
+            format!("{b:#04x}")
         }
     }
 
@@ -194,7 +190,7 @@ fn generate_matcher_fn(
         let ind2 = "    ".repeat(indent + 1);
         let ind3 = "    ".repeat(indent + 2);
 
-        out.push_str(&format!("{{\n"));
+        out.push_str("{\n");
 
         let val = node.value;
         match (more_data, node.children.is_empty(), node.match_type) {
@@ -461,7 +457,7 @@ fn main() {
             key,
             key_sequence,
         };
-        write!(key_sequence_file, "// {m:?}\n").unwrap();
+        writeln!(key_sequence_file, "// {m:?}").unwrap();
 
         all_keys.push(m);
     }
@@ -496,50 +492,50 @@ fn main() {
         }
     }
 
-    write!(
+    writeln!(
         key_sequence_file,
-        "#[derive(Debug, Clone, Copy, PartialEq, Eq, derive_more::TryFrom)]\n"
+        "#[derive(Debug, Clone, Copy, PartialEq, Eq, derive_more::TryFrom)]"
     )
     .unwrap();
-    write!(key_sequence_file, "#[try_from(repr)]\n").unwrap();
-    write!(key_sequence_file, "#[repr(u8)]\n").unwrap();
-    write!(key_sequence_file, "pub enum Key {{\n").unwrap();
+    writeln!(key_sequence_file, "#[try_from(repr)]").unwrap();
+    writeln!(key_sequence_file, "#[repr(u8)]").unwrap();
+    writeln!(key_sequence_file, "pub enum Key {{").unwrap();
     for key in named_keys {
-        write!(key_sequence_file, "    {key},\n").unwrap();
+        writeln!(key_sequence_file, "    {key},").unwrap();
     }
-    write!(key_sequence_file, "}}\n").unwrap();
+    writeln!(key_sequence_file, "}}").unwrap();
 
     let all_keys = key_codes_u
         .keys()
         .chain(key_codes_tilde.keys())
         .collect::<BTreeSet<_>>();
-    write!(
+    writeln!(
         key_sequence_file,
-        "#[derive(Debug, Clone, Copy, PartialEq, Eq)]\n"
+        "#[derive(Debug, Clone, Copy, PartialEq, Eq)]"
     )
     .unwrap();
-    write!(key_sequence_file, "pub enum KeyCode {{\n").unwrap();
+    writeln!(key_sequence_file, "pub enum KeyCode {{").unwrap();
     for key in all_keys {
-        write!(key_sequence_file, "    {key},\n").unwrap();
+        writeln!(key_sequence_file, "    {key},").unwrap();
     }
-    write!(key_sequence_file, "}}\n").unwrap();
+    writeln!(key_sequence_file, "}}").unwrap();
 
-    write!(key_sequence_file, "enum KeyCodeU {{\n").unwrap();
+    writeln!(key_sequence_file, "enum KeyCodeU {{").unwrap();
     for (key, code) in key_codes_u {
-        write!(key_sequence_file, "    {key} = {code},\n").unwrap();
+        writeln!(key_sequence_file, "    {key} = {code},").unwrap();
     }
-    write!(key_sequence_file, "}}\n").unwrap();
+    writeln!(key_sequence_file, "}}").unwrap();
 
-    write!(key_sequence_file, "enum KeyCodeTilde {{\n").unwrap();
+    writeln!(key_sequence_file, "enum KeyCodeTilde {{").unwrap();
     for (key, code) in key_codes_tilde {
-        write!(key_sequence_file, "    {key} = {code},\n").unwrap();
+        writeln!(key_sequence_file, "    {key} = {code},").unwrap();
     }
-    write!(key_sequence_file, "}}\n").unwrap();
+    writeln!(key_sequence_file, "}}").unwrap();
 
     let max_sequence_len = all_sequences.keys().map(|s| s.len()).max().unwrap();
-    write!(
+    writeln!(
         key_sequence_file,
-        "pub const MAX_SEQUENCE_LEN: usize = {max_sequence_len};\n"
+        "pub const MAX_SEQUENCE_LEN: usize = {max_sequence_len};"
     )
     .unwrap();
 

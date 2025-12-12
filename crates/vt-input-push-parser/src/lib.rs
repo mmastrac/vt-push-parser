@@ -1,4 +1,4 @@
-use vt_push_parser::event::{CSI, DCS, SS2, SS3, VTEvent};
+use vt_push_parser::event::{CSI, SS2, SS3, VTEvent};
 use vt_push_parser::{VTPushParser, capture};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -285,23 +285,20 @@ pub struct VTPushParserInput {
 }
 
 fn handle_vt_event(event: VTEvent<'_>, mut cb: impl FnMut(InputEvent)) {
-    println!("VTEvent: {:?}", event);
-    match &event {
-        VTEvent::Csi(csi) => match (csi.private, csi.final_byte) {
-            (None, b'u') => match csi.params.len() {
-                1 => {}
-                2 => {}
-                _ => {}
-            },
-            (None | Some(b'>'), b'~') => match csi.params.len() {
-                2 => {}
-                3 => {}
-                _ => {}
-            },
+    println!("VTEvent: {event:?}");
+    if let VTEvent::Csi(csi) = &event { match (csi.private, csi.final_byte) {
+        (None, b'u') => match csi.params.len() {
+            1 => {}
+            2 => {}
+            _ => {}
+        },
+        (None | Some(b'>'), b'~') => match csi.params.len() {
+            2 => {}
+            3 => {}
             _ => {}
         },
         _ => {}
-    }
+    } }
 
     // // Xterm standard mouse events (three utf-8 or three bytes after)
     // _EV_MOUSE: CSI M
@@ -323,6 +320,12 @@ fn handle_key_event(what: u32, mut cb: impl FnMut(InputEvent)) {
             char::from_u32(what & 0xffffff).unwrap(),
             Modifier((what >> 24) as u8),
         ));
+    }
+}
+
+impl Default for VTPushParserInput {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -552,10 +555,10 @@ mod tests {
 
     #[test]
     fn test_find_sequence() {
-        let mut bytes = b"\x1ba\x1b[Aa\xf0\x9f\x9b\x9c\x1b[B".as_slice();
+        let bytes = b"\x1ba\x1b[Aa\xf0\x9f\x9b\x9c\x1b[B".as_slice();
         let mut input_parser = VTPushParserInput::new();
         input_parser.feed_with(bytes, |event| {
-            println!("Event: {:?}", event);
+            println!("Event: {event:?}");
             // assert_eq!(event, InputEvent::Key(keys::KeyCode::UP, Modifier::empty()));
         });
     }
