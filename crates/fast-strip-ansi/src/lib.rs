@@ -10,8 +10,10 @@ use vt_push_parser::{VT_PARSER_INTEREST_NONE, VTPushParser};
 pub fn strip_ansi_string(s: &str) -> Cow<'_, str> {
     let mut output = Cow::Borrowed(s);
     let mut parser = VTPushParser::new_with_interest::<VT_PARSER_INTEREST_NONE>();
+    let mut has_text = false;
     parser.feed_with(s.as_bytes(), |event: VTEvent| {
         if let VTEvent::Raw(text) = event {
+            has_text = true;
             if text.len() == s.len() {
                 return;
             }
@@ -28,7 +30,7 @@ pub fn strip_ansi_string(s: &str) -> Cow<'_, str> {
             output.push_str(String::from_utf8_lossy(text).as_ref());
         }
     });
-    output
+    if has_text { output } else { Cow::Borrowed("") }
 }
 
 /// Strip ANSI escape sequences from a byte slice. If the input contains no
@@ -36,8 +38,10 @@ pub fn strip_ansi_string(s: &str) -> Cow<'_, str> {
 pub fn strip_ansi_bytes(s: &[u8]) -> Cow<'_, [u8]> {
     let mut output = Cow::Borrowed(s);
     let mut parser = VTPushParser::new_with_interest::<VT_PARSER_INTEREST_NONE>();
+    let mut has_text = false;
     parser.feed_with(s, |event: VTEvent| {
         if let VTEvent::Raw(text) = event {
+            has_text = true;
             if text.len() == s.len() {
                 return;
             }
@@ -54,7 +58,7 @@ pub fn strip_ansi_bytes(s: &[u8]) -> Cow<'_, [u8]> {
             output.extend_from_slice(text);
         }
     });
-    output
+    if has_text { output } else { Cow::Borrowed(b"") }
 }
 
 /// Strip ANSI escape sequences from a byte slice, calling a callback for each
@@ -176,5 +180,20 @@ mod tests {
             .write_all(b"Hello, world!\x1b[31mHello, world!\x1b[0m")
             .unwrap();
         assert_eq!(writer.into_inner(), b"Hello, world!Hello, world!");
+    }
+
+    #[test]
+    fn test_only_ansi() {
+        let mut writer = Writer::new(Vec::new());
+        writer
+            .write_all("\x1b[31m\x1b[1m\x1b[0m".as_bytes())
+            .unwrap();
+        assert_eq!(writer.into_inner(), b"");
+
+        assert_eq!(strip_ansi_string("\x1b[31m\x1b[1m\x1b[0m"), "");
+        assert_eq!(
+            strip_ansi_bytes(b"\x1b[31m\x1b[1m\x1b[0m"),
+            Cow::Borrowed(b"")
+        );
     }
 }
