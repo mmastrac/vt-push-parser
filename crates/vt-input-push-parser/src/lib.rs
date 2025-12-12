@@ -233,6 +233,7 @@ mod keys {
         }
     }
 
+    #[allow(unused)]
     pub fn find_sequence_idle(bytes: &[u8]) -> MatchResult {
         match find_sequence_idle_gen(bytes) {
             MatchResult::NoMatch { length } => match bytes {
@@ -258,6 +259,7 @@ mod keys {
 }
 
 #[derive(Debug, Default)]
+#[allow(unused)]
 enum CaptureState {
     #[default]
     None,
@@ -286,19 +288,21 @@ pub struct VTPushParserInput {
 
 fn handle_vt_event(event: VTEvent<'_>, mut cb: impl FnMut(InputEvent)) {
     println!("VTEvent: {event:?}");
-    if let VTEvent::Csi(csi) = &event { match (csi.private, csi.final_byte) {
-        (None, b'u') => match csi.params.len() {
-            1 => {}
-            2 => {}
+    if let VTEvent::Csi(csi) = &event {
+        match (csi.private, csi.final_byte) {
+            (None, b'u') => match csi.params.len() {
+                1 => {}
+                2 => {}
+                _ => {}
+            },
+            (None | Some(b'>'), b'~') => match csi.params.len() {
+                2 => {}
+                3 => {}
+                _ => {}
+            },
             _ => {}
-        },
-        (None | Some(b'>'), b'~') => match csi.params.len() {
-            2 => {}
-            3 => {}
-            _ => {}
-        },
-        _ => {}
-    } }
+        }
+    }
 
     // // Xterm standard mouse events (three utf-8 or three bytes after)
     // _EV_MOUSE: CSI M
@@ -353,6 +357,7 @@ impl VTPushParserInput {
                         self.data_accumulator.clear();
                     }
                     CaptureState::Mouse => {
+                        #[allow(unused)]
                         let s = str::from_utf8(&self.data_accumulator);
                         self.data_accumulator.clear();
                         cb(InputEvent::Mouse(MouseEvent::Button(
