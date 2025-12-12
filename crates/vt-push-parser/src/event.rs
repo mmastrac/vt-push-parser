@@ -1,5 +1,5 @@
 //! Event types.
-use std::iter::Map;
+use std::{io, iter::Map};
 
 use smallvec::SmallVec;
 
@@ -627,6 +627,151 @@ impl<'a> VTEvent<'a> {
             }
         }
 
+        Ok(len)
+    }
+
+    /// Encode the event into the provided writer, returning the number of bytes
+    /// written.
+    ///
+    /// If the write fails for any reason, it is not possible to determine how
+    /// many bytes were written.
+    ///
+    /// The order of writes is not specified and may change between versions of
+    /// this crate.
+    pub fn write_to(&self, mut writer: impl io::Write) -> Result<usize, io::Error> {
+        use crate::{BEL, CAN, CSI, DCS, ESC, OSC, SS2, SS3, ST_FINAL};
+
+        use VTEvent::*;
+        let mut len = 0;
+        match self {
+            Raw(s) | OscData(s) | DcsData(s) => {
+                writer.write_all(s)?;
+                len = s.len();
+            }
+            EscInvalid(esc_invalid) => {
+                use self::EscInvalid::*;
+                match esc_invalid {
+                    One(b) => {
+                        writer.write_all(&[ESC, *b])?;
+                        len = 2;
+                    }
+                    Two(b1, b2) => {
+                        writer.write_all(&[ESC, *b1, *b2])?;
+                        len = 3;
+                    }
+                    Three(b1, b2, b3) => {
+                        writer.write_all(&[ESC, *b1, *b2, *b3])?;
+                        len = 4;
+                    }
+                    Four(b1, b2, b3, b4) => {
+                        writer.write_all(&[ESC, *b1, *b2, *b3, *b4])?;
+                        len = 5;
+                    }
+                }
+            }
+            OscCancel | DcsCancel => {
+                writer.write_all(&[CAN])?;
+                len = 1;
+            }
+            C0(b) => {
+                writer.write_all(&[*b])?;
+                len = 1;
+            }
+            Ss2(ss2) => {
+                writer.write_all(&[ESC, SS2, ss2.char])?;
+                len = 3;
+            }
+            Ss3(ss3) => {
+                writer.write_all(&[ESC, SS3, ss3.char])?;
+                len = 3;
+            }
+            Esc(esc) => {
+                writer.write_all(&[ESC])?;
+                len = 1;
+                if let Some(p) = esc.private {
+                    writer.write_all(&[p])?;
+                    len = 2;
+                }
+                if esc.intermediates.len() > 0 {
+                    writer.write_all(&esc.intermediates.data[..esc.intermediates.len()])?;
+                    len += esc.intermediates.len();
+                }
+                writer.write_all(&[esc.final_byte])?;
+                len += 1;
+            }
+            Csi(csi) => {
+                writer.write_all(&[ESC, CSI])?;
+                len = 2;
+                if let Some(p) = csi.private {
+                    writer.write_all(&[p])?;
+                    len = 3;
+                }
+                let mut first = true;
+                for param in csi.params {
+                    if !first {
+                        writer.write_all(&[b';'])?;
+                        len += 1;
+                    } else {
+                        first = false;
+                    }
+                    writer.write_all(param)?;
+                    len += param.len();
+                }
+                if csi.intermediates.len() > 0 {
+                    writer.write_all(&csi.intermediates.data[..csi.intermediates.len()])?;
+                    len += csi.intermediates.len();
+                }
+                writer.write_all(&[csi.final_byte])?;
+                len += 1;
+            }
+            DcsStart(dcs_start) => {
+                writer.write_all(&[ESC, DCS])?;
+                len = 2;
+                if let Some(p) = dcs_start.private {
+                    writer.write_all(&[p])?;
+                    len = 3;
+                }
+                let mut first = true;
+                for param in dcs_start.params {
+                    if !first {
+                        writer.write_all(&[b';'])?;
+                        len += 1;
+                    } else {
+                        first = false;
+                    }
+                    writer.write_all(param)?;
+                    len += param.len();
+                }
+                if dcs_start.intermediates.len() > 0 {
+                    writer.write_all(
+                        &dcs_start.intermediates.data[..dcs_start.intermediates.len()],
+                    )?;
+                    len += dcs_start.intermediates.len();
+                }
+                writer.write_all(&[dcs_start.final_byte])?;
+                len += 1;
+            }
+            DcsEnd(s) => {
+                writer.write_all(s)?;
+                len += s.len();
+                writer.write_all(&[ESC, ST_FINAL])?;
+                len += 2;
+            }
+            OscStart => {
+                writer.write_all(&[ESC, OSC])?;
+                len = 2;
+            }
+            OscEnd { data, used_bel } => {
+                writer.write_all(data)?;
+                if *used_bel {
+                    writer.write_all(&[BEL])?;
+                    len = 1 + data.len();
+                } else {
+                    writer.write_all(&[ESC, ST_FINAL])?;
+                    len = 2 + data.len();
+                }
+            }
+        }
         Ok(len)
     }
 

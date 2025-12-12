@@ -254,6 +254,28 @@ fn test(output: &mut String, test_name: &str, line: &str, decoded: &[u8]) {
             let n = event.encode(&mut buffer).unwrap();
             re_encoded.extend_from_slice(&buffer[..n]);
 
+            // Ensure that write_to produces the same result as encode
+            let mut writer = Vec::with_capacity(event.byte_len());
+            let written = event.write_to(&mut writer).unwrap();
+            assert_eq!(
+                writer,
+                buffer[..n],
+                "Write of {event:?} returned {writer:02X?} but expected {:02X?}",
+                &buffer[..n]
+            );
+            assert_eq!(
+                written,
+                event.byte_len(),
+                "Write of {event:?} returned {written} but expected {}",
+                event.byte_len()
+            );
+            assert_eq!(
+                written,
+                writer.len(),
+                "Write of {event:?} returned {written} but expected {}",
+                writer.len()
+            );
+
             if matches!(event, VTEvent::C0(0x7f)) {
                 raw_del = true;
             }
