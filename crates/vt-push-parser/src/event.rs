@@ -692,7 +692,7 @@ impl<'a> VTEvent<'a> {
                     writer.write_all(&[p])?;
                     len = 2;
                 }
-                if esc.intermediates.len() > 0 {
+                if !esc.intermediates.is_empty() {
                     writer.write_all(&esc.intermediates.data[..esc.intermediates.len()])?;
                     len += esc.intermediates.len();
                 }
@@ -709,7 +709,7 @@ impl<'a> VTEvent<'a> {
                 let mut first = true;
                 for param in csi.params {
                     if !first {
-                        writer.write_all(&[b';'])?;
+                        writer.write_all(b";")?;
                         len += 1;
                     } else {
                         first = false;
@@ -717,7 +717,7 @@ impl<'a> VTEvent<'a> {
                     writer.write_all(param)?;
                     len += param.len();
                 }
-                if csi.intermediates.len() > 0 {
+                if !csi.intermediates.is_empty() {
                     writer.write_all(&csi.intermediates.data[..csi.intermediates.len()])?;
                     len += csi.intermediates.len();
                 }
@@ -734,7 +734,7 @@ impl<'a> VTEvent<'a> {
                 let mut first = true;
                 for param in dcs_start.params {
                     if !first {
-                        writer.write_all(&[b';'])?;
+                        writer.write_all(b";")?;
                         len += 1;
                     } else {
                         first = false;
@@ -742,7 +742,7 @@ impl<'a> VTEvent<'a> {
                     writer.write_all(param)?;
                     len += param.len();
                 }
-                if dcs_start.intermediates.len() > 0 {
+                if !dcs_start.intermediates.is_empty() {
                     writer.write_all(
                         &dcs_start.intermediates.data[..dcs_start.intermediates.len()],
                     )?;
