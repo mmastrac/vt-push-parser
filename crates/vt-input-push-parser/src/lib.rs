@@ -233,6 +233,7 @@ mod keys {
         }
     }
 
+    #[allow(unused)]
     pub fn find_sequence_idle(bytes: &[u8]) -> MatchResult {
         match find_sequence_idle_gen(bytes) {
             MatchResult::NoMatch { length } => match bytes {
@@ -258,6 +259,7 @@ mod keys {
 }
 
 #[derive(Debug, Default)]
+#[allow(unused)]
 enum CaptureState {
     #[default]
     None,
@@ -355,6 +357,7 @@ impl VTPushParserInput {
                         self.data_accumulator.clear();
                     }
                     CaptureState::Mouse => {
+                        #[allow(unused)]
                         let s = str::from_utf8(&self.data_accumulator);
                         self.data_accumulator.clear();
                         cb(InputEvent::Mouse(MouseEvent::Button(
