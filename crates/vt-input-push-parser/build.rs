@@ -24,6 +24,7 @@ enum Key {
 
 #[derive(Debug, Clone)]
 enum KeySequence {
+    #[allow(dead_code)]
     Regular(u16, u8),
     Irregular(Vec<u8>),
 }
@@ -95,9 +96,7 @@ fn decode_sequence(sequence: &str) -> Vec<u8> {
                     sequence_bytes.push(hex);
                 } else if let Ok(ascii_control) = AsciiControl::from_str(part) {
                     sequence_bytes.push(ascii_control as u8);
-                } else if part.chars().all(|c| c.is_ascii_digit()) {
-                    sequence_bytes.extend_from_slice(part.as_bytes());
-                } else if part.len() == 1 {
+                } else if part.chars().all(|c| c.is_ascii_digit()) || part.len() == 1 {
                     sequence_bytes.extend_from_slice(part.as_bytes());
                 } else {
                     panic!("Invalid part: {part:?}");
