@@ -8,11 +8,32 @@ pub enum PasteEvent {
     Continue,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseButton {
+    Left,
+    Middle,
+    Right,
+    WheelUp,
+    WheelDown,
+    WheelLeft,
+    WheelRight,
+    Extra(u8),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseEventKind {
+    Press(MouseButton),
+    Release(MouseButton),
+    Drag(MouseButton),
+    Motion,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MouseEvent {
-    Button(u8, Modifier),
-    ButtonRelease(u8, Modifier),
-    Motion(u16, u16),
+pub struct MouseEvent {
+    pub kind: MouseEventKind,
+    pub x: u16,
+    pub y: u16,
+    pub modifiers: Modifier,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -259,14 +280,41 @@ mod keys {
 }
 
 #[derive(Debug, Default)]
-#[allow(unused)]
 enum CaptureState {
     #[default]
     None,
     Paste,
     Mouse,
-    MouseHilite,
-    MouseDrag,
+}
+
+/// Decodes the mouse button byte used by X10, SGR, and urxvt protocols.
+///
+/// Returns (button, modifiers, is_motion).
+fn decode_mouse_button_byte(cb: u16) -> (MouseButton, Modifier, bool) {
+    let modifiers = Modifier::from_bits_truncate(
+        (if cb & 0x04 != 0 { Modifier::SHIFT.0 } else { 0 })
+            | (if cb & 0x08 != 0 { Modifier::ALT.0 } else { 0 })
+            | (if cb & 0x10 != 0 { Modifier::CTRL.0 } else { 0 }),
+    );
+    let is_motion = cb & 0x20 != 0;
+    let button_bits = cb & 0xC3; // bits 0-1 and 6-7
+    let button = match button_bits {
+        0 => MouseButton::Left,
+        1 => MouseButton::Middle,
+        2 => MouseButton::Right,
+        64 => MouseButton::WheelUp,
+        65 => MouseButton::WheelDown,
+        66 => MouseButton::WheelLeft,
+        67 => MouseButton::WheelRight,
+        n => MouseButton::Extra(n as u8),
+    };
+    (button, modifiers, is_motion)
+}
+
+enum HandleAction<'a> {
+    Handled,
+    Capture(CaptureState, capture::VTCaptureInternal),
+    Unhandled(VTEvent<'a>),
 }
 
 /// A push parser for the VT/xterm input protocol.
@@ -286,10 +334,77 @@ pub struct VTPushParserInput {
     parser: VTPushParser,
 }
 
-fn handle_vt_event(event: VTEvent<'_>, mut cb: impl FnMut(InputEvent)) {
-    println!("VTEvent: {event:?}");
-    if let VTEvent::Csi(csi) = &event {
+fn handle_vt_event<'a>(event: VTEvent<'a>, cb: &mut impl FnMut(InputEvent)) -> HandleAction<'a> {
+    if let VTEvent::Csi(ref csi) = event {
         match (csi.private, csi.final_byte) {
+            // SGR mouse press/drag/motion: CSI < Pb ; Px ; Py M
+            (Some(b'<'), b'M') => {
+                if let (Some(pb), Some(px), Some(py)) = (
+                    csi.params.try_parse::<u16>(0),
+                    csi.params.try_parse::<u16>(1),
+                    csi.params.try_parse::<u16>(2),
+                ) {
+                    let (button, modifiers, is_motion) = decode_mouse_button_byte(pb);
+                    let kind = if is_motion {
+                        MouseEventKind::Drag(button)
+                    } else {
+                        MouseEventKind::Press(button)
+                    };
+                    cb(InputEvent::Mouse(MouseEvent {
+                        kind,
+                        x: px.saturating_sub(1),
+                        y: py.saturating_sub(1),
+                        modifiers,
+                    }));
+                    return HandleAction::Handled;
+                }
+            }
+            // SGR mouse release: CSI < Pb ; Px ; Py m
+            (Some(b'<'), b'm') => {
+                if let (Some(pb), Some(px), Some(py)) = (
+                    csi.params.try_parse::<u16>(0),
+                    csi.params.try_parse::<u16>(1),
+                    csi.params.try_parse::<u16>(2),
+                ) {
+                    let (button, modifiers, _) = decode_mouse_button_byte(pb);
+                    cb(InputEvent::Mouse(MouseEvent {
+                        kind: MouseEventKind::Release(button),
+                        x: px.saturating_sub(1),
+                        y: py.saturating_sub(1),
+                        modifiers,
+                    }));
+                    return HandleAction::Handled;
+                }
+            }
+            // X10 or urxvt mouse: CSI [Pb ; Px ; Py] M
+            (None, b'M') => {
+                if csi.params.is_empty() {
+                    // X10 mouse: CSI M followed by 3 raw bytes
+                    return HandleAction::Capture(
+                        CaptureState::Mouse,
+                        capture::VTCaptureInternal::Count(3),
+                    );
+                } else if let (Some(pb), Some(px), Some(py)) = (
+                    csi.params.try_parse::<u16>(0),
+                    csi.params.try_parse::<u16>(1),
+                    csi.params.try_parse::<u16>(2),
+                ) {
+                    // urxvt mouse: CSI Pb ; Px ; Py M
+                    let (button, modifiers, is_motion) = decode_mouse_button_byte(pb);
+                    let kind = if is_motion {
+                        MouseEventKind::Drag(button)
+                    } else {
+                        MouseEventKind::Press(button)
+                    };
+                    cb(InputEvent::Mouse(MouseEvent {
+                        kind,
+                        x: px.saturating_sub(1),
+                        y: py.saturating_sub(1),
+                        modifiers,
+                    }));
+                    return HandleAction::Handled;
+                }
+            }
             (None, b'u') => match csi.params.len() {
                 1 => {}
                 2 => {}
@@ -304,15 +419,7 @@ fn handle_vt_event(event: VTEvent<'_>, mut cb: impl FnMut(InputEvent)) {
         }
     }
 
-    // // Xterm standard mouse events (three utf-8 or three bytes after)
-    // _EV_MOUSE: CSI M
-    // // Mouse highlight mode. If the start and end coordinates are the same locations
-    // // two bytes of data follow (x, y)
-    // _EV_MOUSE_HILITE_CLICK: CSI t
-    // // ... otherwise six bytes of data follow (startx, starty, endx, endy, mousex, and mousey)
-    // _EV_MOUSE_HILITE_DRAG: CSI T
-
-    cb(InputEvent::Csi(event.csi().unwrap()));
+    HandleAction::Unhandled(event)
 }
 
 fn handle_key_event(what: u32, mut cb: impl FnMut(InputEvent)) {
@@ -346,6 +453,33 @@ impl VTPushParserInput {
     }
 
     pub fn feed_with(&mut self, mut bytes: &[u8], mut cb: impl FnMut(InputEvent)) {
+        // Handle the result of handle_vt_event, setting up capture or emitting
+        // unhandled events as raw CSI.
+        macro_rules! dispatch_vt {
+            ($action:expr, $cb:expr, $capture:expr, $capture_state:expr) => {
+                match $action {
+                    HandleAction::Handled => {}
+                    HandleAction::Capture(state, internal) => {
+                        *$capture = internal;
+                        *$capture_state = state;
+                    }
+                    HandleAction::Unhandled(event) => {
+                        let input_event = match event {
+                            VTEvent::Csi(csi) => Some(InputEvent::Csi(csi)),
+                            VTEvent::OscEnd { data, .. } => Some(InputEvent::Osc(data)),
+                            VTEvent::DcsEnd(data) => Some(InputEvent::Dcs(data)),
+                            VTEvent::Ss2(ss2) => Some(InputEvent::Ss2(ss2)),
+                            VTEvent::Ss3(ss3) => Some(InputEvent::Ss3(ss3)),
+                            _ => None,
+                        };
+                        if let Some(e) = input_event {
+                            $cb(e);
+                        }
+                    }
+                }
+            };
+        }
+
         loop {
             // First, check if we have an active capture.
             if let Some(captured) = self.capture.feed(&mut bytes) {
@@ -357,25 +491,32 @@ impl VTPushParserInput {
                         self.data_accumulator.clear();
                     }
                     CaptureState::Mouse => {
-                        #[allow(unused)]
-                        let s = str::from_utf8(&self.data_accumulator);
+                        let data = &self.data_accumulator;
+                        if data.len() >= 3 {
+                            // X10 protocol: all three bytes are offset by 32
+                            let cb_byte = (data[0] as u16).saturating_sub(32);
+                            let x = (data[1] as u16).saturating_sub(33);
+                            let y = (data[2] as u16).saturating_sub(33);
+                            // In X10 protocol, button byte 3 (bits 0-1) means release
+                            let is_release = cb_byte & 0x03 == 3;
+                            let (button, modifiers, is_motion) =
+                                decode_mouse_button_byte(cb_byte);
+                            let kind = if is_release {
+                                // X10 doesn't tell us which button was released
+                                MouseEventKind::Release(MouseButton::Left)
+                            } else if is_motion {
+                                MouseEventKind::Drag(button)
+                            } else {
+                                MouseEventKind::Press(button)
+                            };
+                            cb(InputEvent::Mouse(MouseEvent {
+                                kind,
+                                x,
+                                y,
+                                modifiers,
+                            }));
+                        }
                         self.data_accumulator.clear();
-                        cb(InputEvent::Mouse(MouseEvent::Button(
-                            captured[0],
-                            Modifier(captured[1]),
-                        )));
-                    }
-                    CaptureState::MouseHilite => {
-                        cb(InputEvent::Mouse(MouseEvent::Button(
-                            captured[0],
-                            Modifier(captured[1]),
-                        )));
-                    }
-                    CaptureState::MouseDrag => {
-                        cb(InputEvent::Mouse(MouseEvent::Button(
-                            captured[0],
-                            Modifier(captured[1]),
-                        )));
                     }
                 }
                 continue;
@@ -383,8 +524,11 @@ impl VTPushParserInput {
 
             // If no active capture, feed the parser if it's not in ground state, otherwise the key buffer.
             if !self.parser.is_ground() {
+                let capture = &mut self.capture;
+                let capture_state = &mut self.capture_state;
                 let read = self.parser.feed_with_abortable(bytes, |event: VTEvent| {
-                    handle_vt_event(event, &mut cb);
+                    let action = handle_vt_event(event, &mut cb);
+                    dispatch_vt!(action, cb, capture, capture_state);
                     false
                 });
                 bytes = &bytes[read..];
@@ -409,11 +553,15 @@ impl VTPushParserInput {
                         // We don't have a match and we know that at least this many bytes
                         // won't match.
                         self.key_buffer.rotate_left(length as _);
+                        let capture = &mut self.capture;
+                        let capture_state = &mut self.capture_state;
                         // Feed them unconditionally to the parser
-                        self.parser.feed_with(
+                        self.parser.feed_with_abortable(
                             &self.key_buffer[keys::MAX_SEQUENCE_LEN - length as usize..],
                             |event: VTEvent<'_>| {
-                                handle_vt_event(event, &mut cb);
+                                let action = handle_vt_event(event, &mut cb);
+                                dispatch_vt!(action, cb, capture, capture_state);
+                                false
                             },
                         );
                     }
@@ -436,9 +584,13 @@ impl VTPushParserInput {
                     keys::MatchResult::NoMatch { length } => {
                         // We don't have a match and we know that at least this many bytes
                         // won't match.
+                        let capture = &mut self.capture;
+                        let capture_state = &mut self.capture_state;
                         self.parser
-                            .feed_with(&bytes[..length as usize], |event: VTEvent<'_>| {
-                                handle_vt_event(event, &mut cb);
+                            .feed_with_abortable(&bytes[..length as usize], |event: VTEvent<'_>| {
+                                let action = handle_vt_event(event, &mut cb);
+                                dispatch_vt!(action, cb, capture, capture_state);
+                                false
                             });
                         bytes = &bytes[length as usize..];
                     }
@@ -562,9 +714,300 @@ mod tests {
     fn test_find_sequence() {
         let bytes = b"\x1ba\x1b[Aa\xf0\x9f\x9b\x9c\x1b[B".as_slice();
         let mut input_parser = VTPushParserInput::new();
+        let mut events = vec![];
         input_parser.feed_with(bytes, |event| {
-            println!("Event: {event:?}");
-            // assert_eq!(event, InputEvent::Key(keys::KeyCode::UP, Modifier::empty()));
+            events.push(format!("{event:?}"));
         });
+        assert!(!events.is_empty());
+    }
+
+    fn collect_events(bytes: &[u8]) -> Vec<InputEvent<'static>> {
+        let mut events = vec![];
+        let mut input_parser = VTPushParserInput::new();
+        input_parser.feed_with(bytes, |event| {
+            // Safety: we only inspect the event, and Mouse/Key events don't borrow
+            let event: InputEvent<'static> = unsafe { std::mem::transmute(event) };
+            events.push(event);
+        });
+        events
+    }
+
+    // SGR mouse tests
+
+    #[test]
+    fn test_sgr_mouse_left_click() {
+        // CSI < 0 ; 10 ; 20 M  (left button press at 10,20)
+        let events = collect_events(b"\x1b[<0;10;20M");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            InputEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Press(MouseButton::Left),
+                x: 9,
+                y: 19,
+                modifiers: Modifier::empty(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_sgr_mouse_right_click() {
+        // CSI < 2 ; 5 ; 3 M
+        let events = collect_events(b"\x1b[<2;5;3M");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            InputEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Press(MouseButton::Right),
+                x: 4,
+                y: 2,
+                modifiers: Modifier::empty(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_sgr_mouse_middle_click() {
+        // CSI < 1 ; 1 ; 1 M
+        let events = collect_events(b"\x1b[<1;1;1M");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            InputEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Press(MouseButton::Middle),
+                x: 0,
+                y: 0,
+                modifiers: Modifier::empty(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_sgr_mouse_release() {
+        // CSI < 0 ; 10 ; 20 m  (left button release)
+        let events = collect_events(b"\x1b[<0;10;20m");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            InputEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Release(MouseButton::Left),
+                x: 9,
+                y: 19,
+                modifiers: Modifier::empty(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_sgr_mouse_wheel_up() {
+        // CSI < 64 ; 10 ; 20 M
+        let events = collect_events(b"\x1b[<64;10;20M");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            InputEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Press(MouseButton::WheelUp),
+                x: 9,
+                y: 19,
+                modifiers: Modifier::empty(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_sgr_mouse_wheel_down() {
+        // CSI < 65 ; 10 ; 20 M
+        let events = collect_events(b"\x1b[<65;10;20M");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            InputEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Press(MouseButton::WheelDown),
+                x: 9,
+                y: 19,
+                modifiers: Modifier::empty(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_sgr_mouse_drag() {
+        // CSI < 32 ; 15 ; 25 M  (left button drag, bit 5 = motion)
+        let events = collect_events(b"\x1b[<32;15;25M");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            InputEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Left),
+                x: 14,
+                y: 24,
+                modifiers: Modifier::empty(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_sgr_mouse_shift_click() {
+        // CSI < 4 ; 10 ; 20 M  (shift + left click, bit 2 = shift)
+        let events = collect_events(b"\x1b[<4;10;20M");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            InputEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Press(MouseButton::Left),
+                x: 9,
+                y: 19,
+                modifiers: Modifier::SHIFT,
+            })
+        );
+    }
+
+    #[test]
+    fn test_sgr_mouse_ctrl_click() {
+        // CSI < 16 ; 10 ; 20 M  (ctrl + left click, bit 4 = ctrl)
+        let events = collect_events(b"\x1b[<16;10;20M");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            InputEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Press(MouseButton::Left),
+                x: 9,
+                y: 19,
+                modifiers: Modifier::CTRL,
+            })
+        );
+    }
+
+    #[test]
+    fn test_sgr_mouse_alt_click() {
+        // CSI < 8 ; 10 ; 20 M  (alt + left click, bit 3 = alt)
+        let events = collect_events(b"\x1b[<8;10;20M");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            InputEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Press(MouseButton::Left),
+                x: 9,
+                y: 19,
+                modifiers: Modifier::ALT,
+            })
+        );
+    }
+
+    #[test]
+    fn test_sgr_mouse_large_coordinates() {
+        // CSI < 0 ; 500 ; 300 M
+        let events = collect_events(b"\x1b[<0;500;300M");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            InputEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Press(MouseButton::Left),
+                x: 499,
+                y: 299,
+                modifiers: Modifier::empty(),
+            })
+        );
+    }
+
+    // urxvt mouse tests
+
+    #[test]
+    fn test_urxvt_mouse_left_click() {
+        // CSI 0 ; 10 ; 20 M  (urxvt: no '<' private prefix)
+        let events = collect_events(b"\x1b[0;10;20M");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            InputEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Press(MouseButton::Left),
+                x: 9,
+                y: 19,
+                modifiers: Modifier::empty(),
+            })
+        );
+    }
+
+    // X10 mouse tests
+
+    #[test]
+    fn test_x10_mouse_left_click() {
+        // CSI M followed by 3 bytes: button=0+32=0x20, x=10+32=0x2a, y=20+32=0x34
+        let events = collect_events(b"\x1b[M\x20\x2a\x34");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            InputEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Press(MouseButton::Left),
+                x: 9,
+                y: 19,
+                modifiers: Modifier::empty(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_x10_mouse_right_click() {
+        // button=2+32=0x22, x=5+32=0x25, y=3+32=0x23
+        let events = collect_events(b"\x1b[M\x22\x25\x23");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            InputEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Press(MouseButton::Right),
+                x: 4,
+                y: 2,
+                modifiers: Modifier::empty(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_x10_mouse_release() {
+        // button=3+32=0x23 means release, x=10+32=0x2a, y=20+32=0x34
+        let events = collect_events(b"\x1b[M\x23\x2a\x34");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            InputEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Release(MouseButton::Left),
+                x: 9,
+                y: 19,
+                modifiers: Modifier::empty(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_x10_mouse_ctrl_click() {
+        // button=0+16(ctrl)+32=0x30, x=10+32=0x2a, y=20+32=0x34
+        let events = collect_events(b"\x1b[M\x30\x2a\x34");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            InputEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Press(MouseButton::Left),
+                x: 9,
+                y: 19,
+                modifiers: Modifier::CTRL,
+            })
+        );
+    }
+
+    #[test]
+    fn test_sgr_mouse_followed_by_key() {
+        // Mouse event followed by a key press
+        let events = collect_events(b"\x1b[<0;10;20Ma");
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[0],
+            InputEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Press(MouseButton::Left),
+                x: 9,
+                y: 19,
+                modifiers: Modifier::empty(),
+            })
+        );
+        assert_eq!(events[1], InputEvent::KeyChar('a', Modifier::empty()));
     }
 }
