@@ -16,9 +16,10 @@ strip-ansi = "0.1.0"
 strip-ansi-escapes = "0.2.1"
 vt-push-parser = { path = "../vt-push-parser" }
 fast-strip-ansi = { path = "../fast-strip-ansi" }
+vt-input-push-parser = { path = "../vt-input-push-parser" }
 
 [dev-dependencies]
-divan = "0.1.21"
+divan = { version = "5.0.1", package = "codspeed-divan-compat" }
 pretty_assertions = "1.4.1"
 vte = "0.15"
 
@@ -31,3 +32,13 @@ path = "benches/strip-ansi-comparison.rs"
 name = "vt-parse"
 harness = false
 path = "benches/vt-parse-comparison.rs"
+
+[[bench]]
+name = "vt-parse-streaming"
+harness = false
+path = "benches/vt-parse-streaming.rs"
+
+[[bench]]
+name = "vt-input-parse"
+harness = false
+path = "benches/vt-input-parse.rs"
