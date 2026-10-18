@@ -283,6 +283,7 @@ mod keys {
 enum CaptureState {
     #[default]
     None,
+    #[allow(dead_code)]
     Paste,
     Mouse,
 }
@@ -499,8 +500,7 @@ impl VTPushParserInput {
                             let y = (data[2] as u16).saturating_sub(33);
                             // In X10 protocol, button byte 3 (bits 0-1) means release
                             let is_release = cb_byte & 0x03 == 3;
-                            let (button, modifiers, is_motion) =
-                                decode_mouse_button_byte(cb_byte);
+                            let (button, modifiers, is_motion) = decode_mouse_button_byte(cb_byte);
                             let kind = if is_release {
                                 // X10 doesn't tell us which button was released
                                 MouseEventKind::Release(MouseButton::Left)
@@ -586,12 +586,14 @@ impl VTPushParserInput {
                         // won't match.
                         let capture = &mut self.capture;
                         let capture_state = &mut self.capture_state;
-                        self.parser
-                            .feed_with_abortable(&bytes[..length as usize], |event: VTEvent<'_>| {
+                        self.parser.feed_with_abortable(
+                            &bytes[..length as usize],
+                            |event: VTEvent<'_>| {
                                 let action = handle_vt_event(event, &mut cb);
                                 dispatch_vt!(action, cb, capture, capture_state);
                                 false
-                            });
+                            },
+                        );
                         bytes = &bytes[length as usize..];
                     }
                     keys::MatchResult::PendingMatch => {
