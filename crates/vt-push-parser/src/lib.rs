@@ -669,11 +669,65 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         }
     }
 
-    pub fn finish<F: FnMut(VTEvent)>(&mut self, _cb: &mut F) {
+    /// Flush any pending parser state.
+    ///
+    /// Call this when the input stream has ended (e.g. the terminal was closed
+    /// or the pipe was closed) to recover any data the parser is still holding
+    /// and to bring the parser back to a clean state for reuse.
+    ///
+    /// What is flushed:
+    /// - a held `ESC`;
+    /// - an unterminated OSC or DCS string is cancelled;
+    /// - an incomplete escape sequence is recovered exactly as [`idle`] does.
+    ///
+    /// Anything else in flight is discarded.
+    pub fn finish<F: FnMut(VTEvent)>(&mut self, mut cb: F) {
+        let held = self.held_byte.take();
+
+        // Emit a held ESC as data.
+        if let Some(b) = held {
+            let buf = [b];
+            let event = match self.st {
+                State::OscString | State::OscEsc => VTEvent::OscData(&buf),
+                State::DcsPassthrough | State::DcsEsc => VTEvent::DcsData(&buf),
+                _ => VTEvent::Raw(&buf),
+            };
+            cb(event);
+        }
+
+        // Cancel any string still in flight, then recover the escape state.
+        let event = match self.st {
+            State::OscString | State::OscEsc => Some(VTEvent::OscCancel),
+            State::DcsPassthrough | State::DcsEsc => Some(VTEvent::DcsCancel),
+            State::Escape => Some(VTEvent::C0(ESC)),
+            State::EscInt => {
+                if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
+                    None
+                } else {
+                    Some(invalid!(self.priv_prefix, self.ints))
+                }
+            }
+            State::EscSs2 | State::EscSs3 => {
+                if INTEREST & VT_PARSER_INTEREST_ESCAPE_RECOVERY == 0 {
+                    None
+                } else {
+                    let c = match self.st {
+                        State::EscSs2 => SS2,
+                        State::EscSs3 => SS3,
+                        _ => unreachable!(),
+                    };
+                    Some(invalid!(c))
+                }
+            }
+            _ => None,
+        };
+
         self.reset_collectors();
         self.st = State::Ground;
 
-        // TODO
+        if let Some(event) = event {
+            cb(event);
+        }
     }
 
     // =====================
@@ -1700,5 +1754,82 @@ mod tests {
                 assert_eq!(bytes, test_bytes, "{test_bytes:02X?} -> {bytes:02X?}");
             }
         }
+    }
+
+    /* ========= finish(): flush held ESC and cancel in-flight strings ========= */
+
+    #[test]
+    fn finish_after_esc_emits_c0_esc() {
+        let mut parser = VTPushParser::new();
+        let mut out = Vec::new();
+        parser.feed_with(b"abc\x1b", |ev: VTEvent| out.push(format!("{ev:?}")));
+        assert_eq!(out, ["Raw('abc')"]);
+
+        parser.finish(|ev: VTEvent| out.push(format!("{ev:?}")));
+        assert_eq!(out, ["Raw('abc')", "C0(1b)"]);
+        assert!(parser.is_ground());
+    }
+
+    #[test]
+    fn finish_mid_dcs_cancels() {
+        let mut parser = VTPushParser::new();
+        let mut out = Vec::new();
+        parser.feed_with(b"\x1bPqdata\x1b", |ev: VTEvent| out.push(format!("{ev:?}")));
+        parser.finish(|ev: VTEvent| out.push(format!("{ev:?}")));
+        assert_eq!(
+            out,
+            [
+                "DcsStart('', q)",
+                "DcsData('data')",
+                "DcsData('<ESC>')",
+                "DcsCancel"
+            ]
+        );
+        assert!(parser.is_ground());
+    }
+
+    #[test]
+    fn finish_mid_osc_cancels() {
+        let mut parser = VTPushParser::new();
+        let mut out = Vec::new();
+        parser.feed_with(b"\x1b]0;title\x1b", |ev: VTEvent| {
+            out.push(format!("{ev:?}"))
+        });
+        parser.finish(|ev: VTEvent| out.push(format!("{ev:?}")));
+        assert_eq!(
+            out,
+            [
+                "OscStart",
+                "OscData('0;title')",
+                "OscData('<ESC>')",
+                "OscCancel"
+            ]
+        );
+        assert!(parser.is_ground());
+    }
+
+    #[test]
+    fn finish_in_csi_header_drops_params() {
+        let mut parser = VTPushParser::new();
+        let mut out = Vec::new();
+        parser.feed_with(b"\x1b[1;2;3", |ev: VTEvent| out.push(format!("{ev:?}")));
+        parser.finish(|ev: VTEvent| out.push(format!("{ev:?}")));
+        assert!(out.is_empty(), "{out:#?}");
+        assert!(parser.is_ground());
+
+        // The parser is reusable, this parses cleanly.
+        parser.feed_with(b"\x1b[0m", |ev: VTEvent| out.push(format!("{ev:?}")));
+        assert_eq!(out, ["Csi('0', '', 'm')"], "{out:#?}");
+    }
+
+    #[test]
+    fn finish_is_idempotent() {
+        let mut parser = VTPushParser::new();
+        let mut count = 0;
+        parser.feed_with(b"\x1b]0;x\x1b", |_ev: VTEvent| {});
+        parser.finish(|_ev: VTEvent| count += 1);
+        parser.finish(|_ev: VTEvent| count += 1);
+        // Exactly 2 events: held ESC as OscData + OscCancel
+        assert_eq!(count, 2);
     }
 }
