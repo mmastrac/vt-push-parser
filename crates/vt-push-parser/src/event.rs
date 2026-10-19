@@ -1767,10 +1767,7 @@ mod test {
         let too_many_strings: Vec<String> = (0..(MAX_PARAMS + 8) as u32)
             .map(|i| i.to_string())
             .collect();
-        let too_many_slices: Vec<&[u8]> = too_many_strings
-            .iter()
-            .map(|s| s.as_bytes())
-            .collect();
+        let too_many_slices: Vec<&[u8]> = too_many_strings.iter().map(|s| s.as_bytes()).collect();
         let too_many = ParamBufOwned::new(&too_many_slices);
         assert_eq!(too_many.len(), MAX_PARAMS);
         assert!(too_many.overflowed());
@@ -1800,8 +1797,8 @@ mod test {
             view.numeric().try_write(&mut [0; 4]).unwrap()
         );
         assert_eq!(
-            owned.borrow().iter().collect::<Vec<_>>(),
-            view.iter().collect::<Vec<_>>()
+            owned.borrow().into_iter().collect::<Vec<_>>(),
+            view.into_iter().collect::<Vec<_>>()
         );
         assert_eq!(
             (&owned).into_iter().collect::<Vec<_>>(),
