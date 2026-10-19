@@ -297,7 +297,7 @@ impl ParamList {
     #[inline]
     pub fn iter(&self) -> ParamListIter<'_> {
         ParamListIter {
-            list: self,
+            source: ParamSource::Inline(self),
             index: 0,
             offset: 0,
         }
@@ -418,6 +418,111 @@ impl serde::Serialize for ParamList {
 
 static EMPTY_PARAMS: ParamList = ParamList::EMPTY;
 
+/// The parameter storage backing a [`ParamBuf`]: either the parser's inline
+/// [`ParamList`] or the content-sized heap storage of a [`ParamBufOwned`].
+#[derive(Copy, Clone)]
+pub(crate) enum ParamSource<'a> {
+    Inline(&'a ParamList),
+    Owned(&'a ParamBufOwned),
+}
+
+impl<'a> ParamSource<'a> {
+    /// The concatenated parameter bytes, the per-parameter lengths and the
+    /// parameter count.
+    #[inline]
+    fn parts(self) -> (&'a [u8], &'a [u8], usize) {
+        match self {
+            ParamSource::Inline(list) => (&list.data, &list.lens, list.count as usize),
+            ParamSource::Owned(owned) => (
+                owned.data.as_deref().unwrap_or(&[]),
+                owned.lens.as_deref().unwrap_or(&[]),
+                owned.lens.as_ref().map_or(0, |lens| lens.len()),
+            ),
+        }
+    }
+
+    #[inline]
+    fn len(self) -> usize {
+        self.parts().2
+    }
+
+    #[inline]
+    fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+
+    #[inline]
+    fn overflowed(self) -> bool {
+        match self {
+            ParamSource::Inline(list) => list.overflowed(),
+            ParamSource::Owned(owned) => owned.overflowed,
+        }
+    }
+
+    fn get(self, index: usize) -> Option<&'a [u8]> {
+        let (data, lens, count) = self.parts();
+        if index >= count {
+            return None;
+        }
+        let offset: usize = lens[..index].iter().map(|&len| len as usize).sum();
+        let len = lens[index] as usize;
+        Some(&data[offset..offset + len])
+    }
+
+    #[inline]
+    fn byte_len(self) -> usize {
+        let (data, _, count) = self.parts();
+        data.len() + count.saturating_sub(1)
+    }
+
+    #[inline]
+    fn iter(self) -> ParamListIter<'a> {
+        ParamListIter {
+            source: self,
+            index: 0,
+            offset: 0,
+        }
+    }
+}
+
+impl PartialEq for ParamSource<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        // Compare the logical contents only: an inline list and an owned
+        // buffer holding the same parameters are equal.
+        self.iter().eq(other.iter())
+    }
+}
+
+impl Eq for ParamSource<'_> {}
+
+impl std::hash::Hash for ParamSource<'_> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Mirror `PartialEq`: hash the logical contents only.
+        self.len().hash(state);
+        for param in self.iter() {
+            param.hash(state);
+        }
+    }
+}
+
+impl std::fmt::Debug for ParamSource<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for ParamSource<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = serializer.serialize_seq(Some(self.len()))?;
+        for param in self.iter() {
+            seq.serialize_element(param)?;
+        }
+        seq.end()
+    }
+}
+
 /// The parameters of an escape sequence (CSI/DCS), as emitted by the parser.
 ///
 /// Parameters are buffered by the parser because sequences may be split
@@ -427,11 +532,15 @@ static EMPTY_PARAMS: ParamList = ParamList::EMPTY;
 /// - at most [`MAX_PARAMS`] parameters;
 /// - at most [`MAX_PARAM_LEN`] bytes per parameter;
 /// - at most [`MAX_PARAM_BYTES`] parameter bytes (separators excluded);
+///
+/// A `ParamBuf` either borrows the parser's inline storage or the
+/// content-sized storage of a [`ParamBufOwned`] (see [`ParamBufOwned::borrow`]);
+/// the limits above apply to both.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct ParamBuf<'a> {
-    pub(crate) params: &'a ParamList,
+    pub(crate) params: ParamSource<'a>,
 }
 
 impl<'a> IntoIterator for ParamBuf<'a> {
@@ -453,7 +562,14 @@ impl<'a> IntoIterator for &ParamBuf<'a> {
 impl<'a> ParamBuf<'a> {
     pub const fn empty() -> Self {
         ParamBuf {
-            params: &EMPTY_PARAMS,
+            params: ParamSource::Inline(&EMPTY_PARAMS),
+        }
+    }
+
+    /// A view over the parser's inline parameter storage.
+    pub(crate) const fn from_param_list(list: &'a ParamList) -> Self {
+        ParamBuf {
+            params: ParamSource::Inline(list),
         }
     }
 
@@ -478,8 +594,9 @@ impl<'a> ParamBuf<'a> {
     }
 
     pub fn to_owned(&self) -> ParamBufOwned {
-        ParamBufOwned {
-            params: *self.params,
+        match self.params {
+            ParamSource::Inline(list) => ParamBufOwned::from_param_list(list),
+            ParamSource::Owned(owned) => owned.clone(),
         }
     }
 
@@ -500,14 +617,14 @@ impl<'a> ParamBuf<'a> {
     }
 }
 
-/// Iterator over the parameters of a [`ParamList`] (and thus of
-/// [`ParamBuf`]).
+/// Iterator over the parameters of a [`ParamList`] (and thus of [`ParamBuf`]
+/// and [`ParamBufOwned`]).
 ///
 /// This type is nameable so that a matching iterator can be written against
-/// [`ParamBuf`] in downstream signatures; use `ParamList::iter` or
-/// `ParamBuf::into_iter` to construct one.
+/// [`ParamBuf`] in downstream signatures; use `ParamList::iter`,
+/// `ParamBuf::into_iter` or `&ParamBufOwned::into_iter` to construct one.
 pub struct ParamListIter<'a> {
-    list: &'a ParamList,
+    source: ParamSource<'a>,
     index: usize,
     offset: usize,
 }
@@ -517,11 +634,12 @@ impl<'a> Iterator for ParamListIter<'a> {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        if self.index >= self.list.count as usize {
+        let (data, lens, count) = self.source.parts();
+        if self.index >= count {
             return None;
         }
-        let len = self.list.lens[self.index] as usize;
-        let param = &self.list.data[self.offset..self.offset + len];
+        let len = lens[self.index] as usize;
+        let param = &data[self.offset..self.offset + len];
         self.index += 1;
         self.offset += len;
         Some(param)
@@ -529,7 +647,7 @@ impl<'a> Iterator for ParamListIter<'a> {
 
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.list.count as usize - self.index;
+        let remaining = self.source.parts().2 - self.index;
         (remaining, Some(remaining))
     }
 }
@@ -612,7 +730,7 @@ impl<'a> IntoIterator for NumericParam<'a> {
 /// Empty parameters are interpreted as `None`.
 #[derive(Debug, Copy, Clone)]
 pub struct NumericParamBuf<'a> {
-    pub(crate) params: &'a ParamList,
+    pub(crate) params: ParamSource<'a>,
 }
 
 impl<'a> IntoIterator for NumericParamBuf<'a> {
@@ -626,7 +744,7 @@ impl<'a> IntoIterator for NumericParamBuf<'a> {
 impl<'a> NumericParamBuf<'a> {
     pub const fn empty() -> Self {
         NumericParamBuf {
-            params: &EMPTY_PARAMS,
+            params: ParamSource::Inline(&EMPTY_PARAMS),
         }
     }
 
