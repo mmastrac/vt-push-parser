@@ -774,9 +774,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         let privp = self.priv_prefix.take();
         VTAction::Event(VTEvent::Csi(CSI {
             private: privp,
-            params: ParamBuf {
-                params: &self.params,
-            },
+            params: ParamBuf::from_param_list(&self.params),
             intermediates: self.ints,
             final_byte,
         }))
@@ -788,9 +786,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         let privp = self.priv_prefix.take();
         VTAction::Event(VTEvent::DcsStart(DCS {
             private: privp,
-            params: ParamBuf {
-                params: &self.params,
-            },
+            params: ParamBuf::from_param_list(&self.params),
             intermediates: self.ints,
             final_byte,
         }))
