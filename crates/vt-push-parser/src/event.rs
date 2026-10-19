@@ -1843,11 +1843,14 @@ mod test {
 
     #[test]
     fn owned_param_size_is_pointer_sized_per_field() {
-        // The owned buffer's inline footprint is three words-ish: two boxed
-        // slices and a bool, far below the inline arena it used to embed
-        // (MAX_PARAMS * MAX_PARAM_LEN = 4 KiB).
-        assert!(std::mem::size_of::<ParamBufOwned>() < 4 * std::mem::size_of::<usize>());
+        // The owned buffer's inline footprint is two boxed slices (fat
+        // pointers) plus a flag: a few words, far below the inline arena it
+        // used to embed (lens + data + counts ~ 1.1 KiB).
+        assert!(std::mem::size_of::<ParamBufOwned>() <= 5 * std::mem::size_of::<usize>());
         assert!(std::mem::size_of::<ParamList>() > 1024);
+        assert!(
+            std::mem::size_of::<ParamBufOwned>() * 16 < std::mem::size_of::<ParamList>()
+        );
     }
 
     #[cfg(feature = "serde")]
