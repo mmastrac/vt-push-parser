@@ -432,7 +432,11 @@ impl<'a> ParamSource<'a> {
     #[inline]
     fn parts(self) -> (&'a [u8], &'a [u8], usize) {
         match self {
-            ParamSource::Inline(list) => (&list.data, &list.lens, list.count as usize),
+            ParamSource::Inline(list) => (
+                &list.data[..list.used as usize],
+                &list.lens[..list.count as usize],
+                list.count as usize,
+            ),
             ParamSource::Owned(owned) => (
                 owned.data.as_deref().unwrap_or(&[]),
                 owned.lens.as_deref().unwrap_or(&[]),
