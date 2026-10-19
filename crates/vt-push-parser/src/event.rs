@@ -1745,22 +1745,9 @@ mod test {
         assert!(!small.overflowed());
 
         // Storing many parameters still only stores what was collected.
-        let many: Vec<&[u8]> = (0..MAX_PARAMS as u32)
-            .map(|i| match i {
-                0 => &b""[..],
-                _ => i.to_string().as_bytes(),
-            })
-            .collect();
-        // The `to_string` temporaries are dropped, but `ParamBufOwned::new`
-        // copies the bytes, so the slices may dangle-free be checked below.
-        let many = ParamBufOwned::new(
-            &(0..MAX_PARAMS as u32)
-                .map(|i| i.to_string())
-                .collect::<Vec<_>>()
-                .iter()
-                .map(|s| s.as_bytes())
-                .collect::<Vec<&[u8]>>()[..],
-        );
+        let strings: Vec<String> = (0..MAX_PARAMS as u32).map(|i| i.to_string()).collect();
+        let slices: Vec<&[u8]> = strings.iter().map(|s| s.as_bytes()).collect();
+        let many = ParamBufOwned::new(&slices);
         assert_eq!(many.len(), MAX_PARAMS);
         assert_eq!(many.get(0), Some(&b"0"[..]));
         assert_eq!(many.get(127), Some(&b"127"[..]));
@@ -1777,13 +1764,14 @@ mod test {
         assert_eq!(long.get(0).map(<[u8]>::len), Some(MAX_PARAM_LEN));
         assert!(long.overflowed());
 
-        let too_many: Vec<&[u8]> = (0..MAX_PARAMS + 8)
+        let too_many_strings: Vec<String> = (0..(MAX_PARAMS + 8) as u32)
             .map(|i| i.to_string())
-            .collect::<Vec<_>>()
+            .collect();
+        let too_many_slices: Vec<&[u8]> = too_many_strings
             .iter()
             .map(|s| s.as_bytes())
             .collect();
-        let too_many = ParamBufOwned::new(&too_many);
+        let too_many = ParamBufOwned::new(&too_many_slices);
         assert_eq!(too_many.len(), MAX_PARAMS);
         assert!(too_many.overflowed());
 
@@ -1796,7 +1784,7 @@ mod test {
     fn param_buf_owned_views_match_parser_views() {
         // A view over owned storage behaves exactly like a view over the
         // parser's inline storage holding the same parameters.
-        let owned = ParamBufOwned::new(&[b"1", b"22", b"]);
+        let owned = ParamBufOwned::new(&[b"1", b"22", b""]);
 
         let mut list = ParamList::EMPTY;
         list.push_param(b"1");
@@ -1807,7 +1795,10 @@ mod test {
         assert_eq!(owned.borrow(), view);
         assert_eq!(owned.borrow().len(), view.len());
         assert_eq!(owned.borrow().byte_len(), view.byte_len());
-        assert_eq!(owned.numeric().try_write(&mut [0; 4]).unwrap(), view.numeric().try_write(&mut [0; 4]).unwrap());
+        assert_eq!(
+            owned.numeric().try_write(&mut [0; 4]).unwrap(),
+            view.numeric().try_write(&mut [0; 4]).unwrap()
+        );
         assert_eq!(
             owned.borrow().iter().collect::<Vec<_>>(),
             view.iter().collect::<Vec<_>>()
@@ -1824,9 +1815,14 @@ mod test {
         assert_eq!(copy.get(1), Some(&b"22"[..]));
 
         // The owning iterator yields the same parameters as `Param`s.
+        fn param(bytes: &[u8]) -> Param {
+            let mut p = Param::EMPTY;
+            p.extend_from_slice(bytes);
+            p
+        }
         assert_eq!(
             owned.into_iter().collect::<Vec<_>>(),
-            vec![Param::new(&b"1"[..]), Param::new(&b"22"[..]), Param::EMPTY]
+            vec![param(b"1"), param(b"22"), Param::EMPTY]
         );
     }
 
