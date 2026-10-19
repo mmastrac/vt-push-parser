@@ -296,8 +296,11 @@ impl ParamList {
     /// The collected parameters, as byte slices.
     #[inline]
     pub fn iter(&self) -> ParamListIter<'_> {
+        let (data, lens, count) = ParamSource::Inline(self).parts();
         ParamListIter {
-            source: ParamSource::Inline(self),
+            data,
+            lens,
+            count,
             index: 0,
             offset: 0,
         }
@@ -481,8 +484,11 @@ impl<'a> ParamSource<'a> {
 
     #[inline]
     fn iter(self) -> ParamListIter<'a> {
+        let (data, lens, count) = self.parts();
         ParamListIter {
-            source: self,
+            data,
+            lens,
+            count,
             index: 0,
             offset: 0,
         }
@@ -628,7 +634,12 @@ impl<'a> ParamBuf<'a> {
 /// [`ParamBuf`] in downstream signatures; use `ParamList::iter`,
 /// `ParamBuf::into_iter` or `&ParamBufOwned::into_iter` to construct one.
 pub struct ParamListIter<'a> {
-    source: ParamSource<'a>,
+    /// Concatenated parameter bytes.
+    data: &'a [u8],
+    /// Length of each parameter.
+    lens: &'a [u8],
+    /// Number of parameters.
+    count: usize,
     index: usize,
     offset: usize,
 }
@@ -638,12 +649,11 @@ impl<'a> Iterator for ParamListIter<'a> {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        let (data, lens, count) = self.source.parts();
-        if self.index >= count {
+        if self.index >= self.count {
             return None;
         }
-        let len = lens[self.index] as usize;
-        let param = &data[self.offset..self.offset + len];
+        let len = self.lens[self.index] as usize;
+        let param = &self.data[self.offset..self.offset + len];
         self.index += 1;
         self.offset += len;
         Some(param)
@@ -651,7 +661,7 @@ impl<'a> Iterator for ParamListIter<'a> {
 
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.source.parts().2 - self.index;
+        let remaining = self.count - self.index;
         (remaining, Some(remaining))
     }
 }
@@ -1327,7 +1337,7 @@ impl ParamBufOwned {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.lens.as_ref().is_none_or(|lens| lens.is_empty())
+        self.len() == 0
     }
 
     pub fn get(&self, index: usize) -> Option<&[u8]> {
