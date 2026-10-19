@@ -800,6 +800,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
     // State handlers
     // =====================
 
+    #[inline(always)]
     fn push_with(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
 
