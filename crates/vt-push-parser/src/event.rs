@@ -1261,12 +1261,23 @@ impl<'a> VTEvent<'a> {
 /// outside the parsing hot path.
 ///
 /// Holding no parameters is allocation-free.
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct ParamBufOwned {
     pub(crate) data: Option<Box<[u8]>>,
     pub(crate) lens: Option<Box<[u8]>>,
     pub(crate) overflowed: bool,
+}
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for ParamBufOwned {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        // Same shape as when this wrapped a `ParamList` by value: a map with
+        // one `"params"` key holding the sequence of parameters.
+        let mut map = serializer.serialize_map(Some(1))?;
+        map.serialize_entry("params", &ParamSource::Owned(self))?;
+        map.end()
+    }
 }
 
 impl ParamBufOwned {
