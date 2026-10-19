@@ -1724,4 +1724,146 @@ mod test {
             &[1, 2, 3]
         );
     }
+
+    #[test]
+    fn param_buf_owned_is_content_sized() {
+        // No parameters: no heap storage at all.
+        let empty = ParamBufOwned::new(&[]);
+        assert!(empty.data.is_none());
+        assert!(empty.lens.is_none());
+        assert!(empty.is_empty());
+        assert_eq!(empty.len(), 0);
+
+        // A small parameter list is stored in small heap allocations: the
+        // bytes actually used ("1234" + "5"), not the parser's full inline
+        // arena (MAX_PARAMS x MAX_PARAM_LEN).
+        let small = ParamBufOwned::new(&[b"1234", b"5"]);
+        assert_eq!(small.data.as_deref(), Some(&b"12345"[..]));
+        assert_eq!(small.lens.as_deref(), Some(&[4, 1][..]));
+        assert_eq!(small.len(), 2);
+        assert_eq!(small.byte_len(), 6); // 5 bytes + 1 separator
+        assert!(!small.overflowed());
+
+        // Storing many parameters still only stores what was collected.
+        let many: Vec<&[u8]> = (0..MAX_PARAMS as u32)
+            .map(|i| match i {
+                0 => &b""[..],
+                _ => i.to_string().as_bytes(),
+            })
+            .collect();
+        // The `to_string` temporaries are dropped, but `ParamBufOwned::new`
+        // copies the bytes, so the slices may dangle-free be checked below.
+        let many = ParamBufOwned::new(
+            &(0..MAX_PARAMS as u32)
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .iter()
+                .map(|s| s.as_bytes())
+                .collect::<Vec<&[u8]>>()[..],
+        );
+        assert_eq!(many.len(), MAX_PARAMS);
+        assert_eq!(many.get(0), Some(&b"0"[..]));
+        assert_eq!(many.get(127), Some(&b"127"[..]));
+        assert_eq!(many.byte_len(), 10 + 90 * 2 + 28 * 3 + 127);
+    }
+
+    #[test]
+    fn param_buf_owned_clamps_like_param_buf() {
+        // Clamping applies to `ParamBufOwned::new` exactly as it does to the
+        // parser: bytes past MAX_PARAM_LEN are dropped, params past the
+        // sequence caps are dropped, and `overflowed()` reports both.
+        let long = ParamBufOwned::new(&[&[b'7'; MAX_PARAM_LEN + 8][..]]);
+        assert_eq!(long.len(), 1);
+        assert_eq!(long.get(0).map(<[u8]>::len), Some(MAX_PARAM_LEN));
+        assert!(long.overflowed());
+
+        let too_many: Vec<&[u8]> = (0..MAX_PARAMS + 8)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .iter()
+            .map(|s| s.as_bytes())
+            .collect();
+        let too_many = ParamBufOwned::new(&too_many);
+        assert_eq!(too_many.len(), MAX_PARAMS);
+        assert!(too_many.overflowed());
+
+        // `ParamBuf::empty` and `ParamBufOwned::empty` agree.
+        assert!(ParamBuf::empty().to_owned().is_empty());
+        assert_eq!(ParamBuf::empty().to_owned(), ParamBufOwned::empty());
+    }
+
+    #[test]
+    fn param_buf_owned_views_match_parser_views() {
+        // A view over owned storage behaves exactly like a view over the
+        // parser's inline storage holding the same parameters.
+        let owned = ParamBufOwned::new(&[b"1", b"22", b"]);
+
+        let mut list = ParamList::EMPTY;
+        list.push_param(b"1");
+        list.push_param(b"22");
+        list.push_param(b"");
+        let view = ParamBuf::from_param_list(&list);
+
+        assert_eq!(owned.borrow(), view);
+        assert_eq!(owned.borrow().len(), view.len());
+        assert_eq!(owned.borrow().byte_len(), view.byte_len());
+        assert_eq!(owned.numeric().try_write(&mut [0; 4]).unwrap(), view.numeric().try_write(&mut [0; 4]).unwrap());
+        assert_eq!(
+            owned.borrow().iter().collect::<Vec<_>>(),
+            view.iter().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            (&owned).into_iter().collect::<Vec<_>>(),
+            view.into_iter().collect::<Vec<_>>()
+        );
+        assert_eq!(format!("{:?}", owned.borrow()), format!("{:?}", view));
+
+        // `to_owned` of an owned-backed view is a deep copy.
+        let copy = owned.borrow().to_owned();
+        assert_eq!(copy, owned);
+        assert_eq!(copy.get(1), Some(&b"22"[..]));
+
+        // The owning iterator yields the same parameters as `Param`s.
+        assert_eq!(
+            owned.into_iter().collect::<Vec<_>>(),
+            vec![Param::new(&b"1"[..]), Param::new(&b"22"[..]), Param::EMPTY]
+        );
+    }
+
+    #[test]
+    fn param_buf_owned_overflowed_from_parser() {
+        // Overflow survives the inline -> owned copy.
+        let mut list = ParamList::EMPTY;
+        list.push_param(&[b'7'; MAX_PARAM_LEN + 8]);
+        list.push_param(b"1");
+        let owned = ParamBuf::from_param_list(&list).to_owned();
+        assert!(owned.overflowed());
+        assert_eq!(owned.len(), 2);
+        assert_eq!(owned.get(0).map(<[u8]>::len), Some(MAX_PARAM_LEN));
+
+        // No overflow in the source, no overflow in the copy.
+        let mut list = ParamList::EMPTY;
+        list.push_param(b"1");
+        let owned = ParamBuf::from_param_list(&list).to_owned();
+        assert!(!owned.overflowed());
+    }
+
+    #[test]
+    fn owned_param_size_is_pointer_sized_per_field() {
+        // The owned buffer's inline footprint is three words-ish: two boxed
+        // slices and a bool, far below the inline arena it used to embed
+        // (MAX_PARAMS * MAX_PARAM_LEN = 4 KiB).
+        assert!(std::mem::size_of::<ParamBufOwned>() < 4 * std::mem::size_of::<usize>());
+        assert!(std::mem::size_of::<ParamList>() > 1024);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn param_buf_owned_serde_shape_unchanged() {
+        // The serialized shape is the same as before the `Box<[u8]>` change:
+        // a map with a single "params" key holding the sequence.
+        let owned = ParamBufOwned::new(&[b"1", b"22"]);
+        let json = serde_json::to_string(&owned).unwrap();
+        assert_eq!(json, r#"{"params":[[49],[50,50]]}"#);
+    }
 }
