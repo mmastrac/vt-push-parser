@@ -44,8 +44,6 @@ pub mod event;
 pub mod iter;
 pub mod signature;
 
-use smallvec::SmallVec;
-
 use ascii::AsciiControl;
 use event::{CSI, DCS, Esc, EscInvalid, SS2, SS3, VTEvent, VTIntermediate};
 
@@ -64,7 +62,7 @@ const PM: u8 = b'^';
 const SOS: u8 = b'X';
 const ST_FINAL: u8 = b'\\';
 
-use crate::event::{Param, ParamBuf, Params};
+use crate::event::{Param, ParamBuf, ParamList};
 
 /// Receives a single [`VTEvent`].
 #[allow(private_bounds)]
@@ -271,7 +269,7 @@ pub struct VTPushParser<const INTEREST: u8 = VT_PARSER_INTEREST_DEFAULT> {
 
     // Header collectors for short escapes (we borrow from these in callbacks)
     ints: VTIntermediate,
-    params: Params,
+    params: ParamList,
     cur_param: Param,
     priv_prefix: Option<u8>,
     held_byte: Option<u8>,
@@ -362,8 +360,8 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         Self {
             st: State::Ground,
             ints: VTIntermediate::empty(),
-            params: SmallVec::new_const(),
-            cur_param: SmallVec::new_const(),
+            params: ParamList::EMPTY,
+            cur_param: Param::EMPTY,
             priv_prefix: None,
             held_byte: None,
         }
@@ -745,11 +743,26 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         self.clear_hdr_collectors();
     }
 
+    #[inline]
+    fn push_cur_param(&mut self, b: u8) {
+        // `Param` clamps its own length, so this can never allocate.
+        self.cur_param.push(b);
+    }
+
+    #[inline]
     fn next_param(&mut self) {
-        self.params.push(std::mem::take(&mut self.cur_param));
+        if self.cur_param.overflowed() {
+            self.params.mark_overflowed();
+        }
+        self.params.push_param(&self.cur_param);
+        self.cur_param.clear();
     }
 
     fn finish_params_if_any(&mut self) {
+        // An empty current parameter is still a parameter: `CSI m` has zero,
+        // but `CSI ;m` has two. When any parameter has been started (or the
+        // current one is non-empty), the current parameter is appended even if
+        // empty, preserving the parameter count (up to the storage caps).
         if !self.cur_param.is_empty() || !self.params.is_empty() {
             self.next_param();
         }
@@ -787,6 +800,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
     // State handlers
     // =====================
 
+    #[inline(always)]
     fn push_with(&mut self, b: u8) -> VTAction<'_> {
         use State::*;
 
@@ -1062,7 +1076,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                     VTAction::None
                 }
                 c if is_digit(c) => {
-                    self.cur_param.push(c);
+                    self.push_cur_param(c);
                     self.st = CsiParam;
                     VTAction::None
                 }
@@ -1072,7 +1086,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                     VTAction::None
                 }
                 b':' => {
-                    self.cur_param.push(b':');
+                    self.push_cur_param(b':');
                     self.st = CsiParam;
                     VTAction::None
                 }
@@ -1106,7 +1120,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                 // Weird case: if we encounter C0 inside of CSI, emit it while we parse.
                 c if is_any_c0(c) => VTAction::Event(VTEvent::C0(c)),
                 c if is_digit(c) => {
-                    self.cur_param.push(c);
+                    self.push_cur_param(c);
                     VTAction::None
                 }
                 b';' => {
@@ -1114,7 +1128,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                     VTAction::None
                 }
                 b':' => {
-                    self.cur_param.push(b':');
+                    self.push_cur_param(b':');
                     VTAction::None
                 }
                 c if is_intermediate(c) => {
@@ -1195,7 +1209,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                     VTAction::None
                 }
                 c if is_digit(c) => {
-                    self.cur_param.push(c);
+                    self.push_cur_param(c);
                     self.st = DcsParam;
                     VTAction::None
                 }
@@ -1236,7 +1250,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                     VTAction::None
                 }
                 c if is_digit(c) => {
-                    self.cur_param.push(c);
+                    self.push_cur_param(c);
                     VTAction::None
                 }
                 b';' => {
@@ -1410,7 +1424,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
 
 #[cfg(test)]
 mod tests {
-    use crate::event::VTOwnedEvent;
+    use crate::event::{MAX_PARAM_LEN, VTOwnedEvent};
 
     use super::*;
     use pretty_assertions::assert_eq;
@@ -1831,5 +1845,148 @@ mod tests {
         parser.finish(|_ev: VTEvent| count += 1);
         // Exactly 2 events: held ESC as OscData + OscCancel
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn param_clamping_at_max_params() {
+        // 200 params: the first 128 survive, the rest are dropped, and the
+        // parser continues normally (state reset, following input parsed).
+        let mut input = b"\x1b[".to_vec();
+        for i in 0..200 {
+            if i > 0 {
+                input.push(b';');
+            }
+            input.extend_from_slice(i.to_string().as_bytes());
+        }
+        input.push(b'm');
+        input.extend_from_slice(b"after");
+
+        let ev = collect_events(&input);
+        let csi = ev
+            .iter()
+            .find(|e| e.starts_with("Csi("))
+            .expect("no Csi event");
+        assert!(csi.contains("'127'"), "param 127 missing: {csi}");
+        assert!(
+            !csi.contains("'128'"),
+            "param 128 should have been clamped: {csi}"
+        );
+        assert_eq!(ev.last().unwrap(), "Raw('after')");
+
+        // Overflow is detectable.
+        let mut parser = VTPushParser::new();
+        let mut overflowed = false;
+        parser.feed_with(&input, &mut |ev: VTEvent| {
+            if let VTEvent::Csi(csi) = ev {
+                overflowed = csi.params.overflowed();
+            }
+        });
+        assert!(overflowed, "params should report overflow");
+
+        // The parser must be back in the ground state after the clamped CSI.
+        let mut parser = VTPushParser::new();
+        parser.feed_with(&input, |_ev: VTEvent| {});
+        assert!(parser.is_ground());
+    }
+
+    #[test]
+    fn param_clamping_per_param_length() {
+        // A 40-digit param is truncated to MAX_PARAM_LEN (32) bytes.
+        let mut input = b"\x1b[".to_vec();
+        input.extend_from_slice(&[b'7'; 40]);
+        input.push(b'm');
+
+        let mut parser = VTPushParser::new();
+        let mut params: Vec<Vec<u8>> = Vec::new();
+        parser.feed_with(&input, &mut |ev: VTEvent| {
+            if let VTEvent::Csi(csi) = ev {
+                for p in &csi.params {
+                    params.push(p.to_vec());
+                }
+            }
+        });
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].len(), MAX_PARAM_LEN);
+        assert!(params[0].iter().all(|&b| b == b'7'));
+
+        // Overflow is detectable.
+        let mut parser = VTPushParser::new();
+        let mut overflowed = false;
+        parser.feed_with(&input, &mut |ev: VTEvent| {
+            if let VTEvent::Csi(csi) = ev {
+                overflowed = csi.params.overflowed();
+            }
+        });
+        assert!(overflowed, "params should report overflow");
+    }
+
+    #[test]
+    fn param_clamping_byte_by_byte() {
+        // Same clamping behavior when the sequence is split across calls:
+        // the caps must hold across feed_with boundaries too.
+        let mut input = b"\x1b[".to_vec();
+        for i in 0..200 {
+            if i > 0 {
+                input.push(b';');
+            }
+            input.extend_from_slice(i.to_string().as_bytes());
+        }
+        input.push(b'm');
+
+        let mut parser = VTPushParser::new();
+        let mut count = 0;
+        let mut total_len = 0;
+        let mut overflowed = false;
+        for b in &input {
+            parser.feed_with(&[*b], &mut |ev: VTEvent| {
+                if let VTEvent::Csi(csi) = ev {
+                    count = csi.params.len();
+                    total_len = csi.params.byte_len();
+                    overflowed = csi.params.overflowed();
+                }
+            });
+        }
+        assert_eq!(count, 128);
+        // Params 0..=127: 10 one-digit + 90 two-digit + 28 three-digit params,
+        // plus 127 separators.
+        let digits = 10 + 90 * 2 + 28 * 3;
+        assert_eq!(total_len, digits + 127);
+        assert!(overflowed, "params should report overflow");
+    }
+
+    #[test]
+    fn param_list_capacity_is_inline_for_corpus() {
+        // The corpus' 100-param sequence must fit without any clamping.
+        let mut input = b"\x1b[?25;".to_vec();
+        for i in 1..=100 {
+            if i > 1 {
+                input.push(b';');
+            }
+            input.extend_from_slice(i.to_string().as_bytes());
+        }
+        input.push(b'm');
+
+        let mut parser = VTPushParser::new();
+        let mut last: Option<(usize, usize)> = None;
+        parser.feed_with(&input, &mut |ev: VTEvent| {
+            if let VTEvent::Csi(csi) = ev {
+                last = Some((csi.params.len(), csi.params.byte_len()));
+            }
+        });
+        let (count, byte_len) = last.expect("no Csi event");
+        assert_eq!(count, 101); // ?25 plus 1..=100
+        // "25" (2) + nine 1-digit + ninety 2-digit + "100" (3 digits),
+        // plus 100 separators.
+        assert_eq!(byte_len, 2 + 9 + 180 + 3 + 100);
+
+        // Inside the documented capacity: no overflow.
+        let mut parser = VTPushParser::new();
+        let mut overflowed = true;
+        parser.feed_with(&input, &mut |ev: VTEvent| {
+            if let VTEvent::Csi(csi) = ev {
+                overflowed = csi.params.overflowed();
+            }
+        });
+        assert!(!overflowed, "params should not report overflow");
     }
 }
