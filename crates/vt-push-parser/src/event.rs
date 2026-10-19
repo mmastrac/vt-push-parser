@@ -1848,9 +1848,7 @@ mod test {
         // used to embed (lens + data + counts ~ 1.1 KiB).
         assert!(std::mem::size_of::<ParamBufOwned>() <= 5 * std::mem::size_of::<usize>());
         assert!(std::mem::size_of::<ParamList>() > 1024);
-        assert!(
-            std::mem::size_of::<ParamBufOwned>() * 16 < std::mem::size_of::<ParamList>()
-        );
+        assert!(std::mem::size_of::<ParamBufOwned>() * 16 < std::mem::size_of::<ParamList>());
     }
 
     #[cfg(feature = "serde")]
