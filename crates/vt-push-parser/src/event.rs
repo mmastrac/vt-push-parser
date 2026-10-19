@@ -1,8 +1,6 @@
 //! Event types.
 use std::{io, iter::Map};
 
-use smallvec::SmallVec;
-
 use crate::AsciiControl;
 
 /// Helper function to format UTF-8 chunks with ASCII control character handling
@@ -143,31 +141,312 @@ impl std::fmt::Debug for VTIntermediate {
     }
 }
 
-pub(crate) type Param = SmallVec<[u8; 32]>;
-pub(crate) type Params = SmallVec<[Param; 8]>;
+/// A single parameter, as collected by the parser.
+///
+/// A fixed-capacity inline buffer of [`MAX_PARAM_LEN`] bytes.
+#[derive(Clone, Copy)]
+pub struct Param {
+    data: [u8; MAX_PARAM_LEN],
+    len: u8,
+    /// Whether any byte was dropped (per-parameter overflow).
+    overflowed: bool,
+}
 
-static EMPTY_PARAMS: Params = Params::new_const();
+impl Param {
+    /// An empty parameter. `const`-callable and usable in statics.
+    pub const EMPTY: Self = Self {
+        data: [0; MAX_PARAM_LEN],
+        len: 0,
+        overflowed: false,
+    };
 
+    /// Whether any byte was dropped because the parameter exceeded
+    /// [`MAX_PARAM_LEN`] bytes.
+    #[inline]
+    pub fn overflowed(&self) -> bool {
+        self.overflowed
+    }
+
+    /// Append a byte, dropping bytes past [`MAX_PARAM_LEN`].
+    #[inline]
+    pub fn push(&mut self, b: u8) {
+        if (self.len as usize) < MAX_PARAM_LEN {
+            self.data[self.len as usize] = b;
+            self.len += 1;
+        } else {
+            self.overflowed = true;
+        }
+    }
+
+    /// Append the bytes of a slice, dropping bytes past [`MAX_PARAM_LEN`].
+    #[inline]
+    pub fn extend_from_slice(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.push(b);
+        }
+    }
+
+    /// Drop all bytes.
+    #[inline]
+    pub fn clear(&mut self) {
+        self.len = 0;
+        self.overflowed = false;
+    }
+
+    /// The collected bytes.
+    #[inline]
+    pub fn as_slice(&self) -> &[u8] {
+        &self.data[..self.len as usize]
+    }
+}
+
+impl std::ops::Deref for Param {
+    type Target = [u8];
+
+    #[inline]
+    fn deref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+impl AsRef<[u8]> for Param {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+impl PartialEq for Param {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl Eq for Param {}
+
+impl std::hash::Hash for Param {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.as_slice().hash(state)
+    }
+}
+
+impl std::fmt::Debug for Param {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.as_slice()).finish()
+    }
+}
+
+/// The maximum number of parameters collected for a single escape sequence.
+pub const MAX_PARAMS: usize = 128;
+
+/// The maximum number of bytes collected for a single parameter. This is the
+/// same as the inline capacity of [`Param`].
+pub const MAX_PARAM_LEN: usize = 32;
+
+/// The maximum number of parameter bytes (excluding `;` separators) collected
+/// for a single escape sequence.
+pub const MAX_PARAM_BYTES: usize = 1024;
+
+/// Fixed-capacity, inline parameter storage for the parser hot path.
+///
+/// Sequences may be split across `feed_with` calls, so parameters cannot be
+/// borrowed from the input and must be buffered by the parser. This type does
+/// so with a bounded, inline arena so that parsing is allocation-free (and
+/// `memcpy`-only) for all input:
+///
+/// - at most [`MAX_PARAMS`] parameters per sequence;
+/// - at most [`MAX_PARAM_LEN`] bytes per parameter;
+/// - at most [`MAX_PARAM_BYTES`] parameter bytes in total per sequence.
+#[derive(Clone, Copy)]
+pub struct ParamList {
+    /// Length of each collected parameter.
+    lens: [u8; MAX_PARAMS],
+    /// Concatenated parameter bytes.
+    data: [u8; MAX_PARAM_BYTES],
+    /// Number of collected parameters.
+    count: u16,
+    /// Number of used bytes in `data`.
+    used: u16,
+    /// Whether anything was dropped (per-parameter, or sequence-wide).
+    overflowed: bool,
+}
+
+impl ParamList {
+    /// An empty list. `const`-callable and usable in statics.
+    pub const EMPTY: Self = Self {
+        lens: [0; MAX_PARAMS],
+        data: [0; MAX_PARAM_BYTES],
+        count: 0,
+        used: 0,
+        overflowed: false,
+    };
+
+    /// The number of collected parameters.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.count as usize
+    }
+
+    /// Whether no parameters have been collected.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// The collected parameters, as byte slices.
+    #[inline]
+    pub fn iter(&self) -> ParamListIter<'_> {
+        ParamListIter {
+            list: self,
+            index: 0,
+            offset: 0,
+        }
+    }
+
+    /// Whether any parameter bytes were dropped: bytes past a parameter's
+    /// [`MAX_PARAM_LEN`] cap, or parameters past the [`MAX_PARAMS`] /
+    /// [`MAX_PARAM_BYTES`] sequence caps.
+    #[inline]
+    pub fn overflowed(&self) -> bool {
+        self.overflowed
+    }
+
+    /// Record that something was dropped (crate-internal: the parser's
+    /// current-parameter buffer clamps per byte, before `push_param`).
+    #[inline]
+    pub(crate) fn mark_overflowed(&mut self) {
+        self.overflowed = true;
+    }
+
+    /// The parameter at `index`, if any.
+    #[inline]
+    pub fn get(&self, index: usize) -> Option<&[u8]> {
+        if index >= self.count as usize {
+            return None;
+        }
+        let offset: usize = self.lens[..index].iter().map(|&len| len as usize).sum();
+        let len = self.lens[index] as usize;
+        Some(&self.data[offset..offset + len])
+    }
+
+    /// The number of parameter bytes (excluding `;` separators).
+    #[inline]
+    pub fn byte_len(&self) -> usize {
+        self.used as usize + self.count.saturating_sub(1) as usize
+    }
+
+    /// Append a parameter, clamping on overflow (see the type docs).
+    ///
+    /// Bytes beyond [`MAX_PARAM_LEN`] within the current parameter, and any
+    /// parameter that does not fit the remaining sequence capacity, are
+    /// dropped; parsing continues normally. Sets
+    /// [`overflowed`](Self::overflowed) if anything was dropped.
+    #[inline]
+    pub fn push_param(&mut self, param: &[u8]) {
+        if param.len() > MAX_PARAM_LEN {
+            self.overflowed = true;
+        }
+        if self.count as usize >= MAX_PARAMS || self.used as usize >= MAX_PARAM_BYTES {
+            self.overflowed = true;
+            return;
+        }
+        let remaining = MAX_PARAM_BYTES - self.used as usize;
+        let len = param.len().min(MAX_PARAM_LEN).min(remaining);
+        if len < param.len() {
+            self.overflowed = true;
+        }
+        let start = self.used as usize;
+        self.data[start..start + len].copy_from_slice(&param[..len]);
+        self.lens[self.count as usize] = len as u8;
+        self.count += 1;
+        self.used += len as u16;
+    }
+
+    /// Drop all collected parameters.
+    #[inline]
+    pub fn clear(&mut self) {
+        self.count = 0;
+        self.used = 0;
+        self.overflowed = false;
+    }
+}
+
+impl PartialEq for ParamList {
+    fn eq(&self, other: &Self) -> bool {
+        // `data`/`lens` may contain stale bytes past `count`/`used`, so compare
+        // the logical contents only.
+        self.count == other.count && self.iter().eq(other.iter())
+    }
+}
+
+impl Eq for ParamList {}
+
+impl std::hash::Hash for ParamList {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Hash the logical contents only, mirroring `PartialEq`: the raw
+        // arrays may contain stale bytes past `count`/`used`.
+        self.count.hash(state);
+        for param in self.iter() {
+            param.hash(state);
+        }
+    }
+}
+
+impl Default for ParamList {
+    fn default() -> Self {
+        Self::EMPTY
+    }
+}
+
+impl std::fmt::Debug for ParamList {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for ParamList {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = serializer.serialize_seq(Some(self.count as usize))?;
+        for param in self.iter() {
+            seq.serialize_element(param)?;
+        }
+        seq.end()
+    }
+}
+
+static EMPTY_PARAMS: ParamList = ParamList::EMPTY;
+
+/// The parameters of an escape sequence (CSI/DCS), as emitted by the parser.
+///
+/// Parameters are buffered by the parser because sequences may be split
+/// across `feed_with` calls. Storage is fixed-capacity and inline, which
+/// bounds what can be reported for extreme input:
+///
+/// - at most [`MAX_PARAMS`] parameters;
+/// - at most [`MAX_PARAM_LEN`] bytes per parameter;
+/// - at most [`MAX_PARAM_BYTES`] parameter bytes (separators excluded);
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct ParamBuf<'a> {
-    pub(crate) params: &'a Params,
+    pub(crate) params: &'a ParamList,
 }
 
 impl<'a> IntoIterator for ParamBuf<'a> {
     type Item = &'a [u8];
-    type IntoIter = Map<std::slice::Iter<'a, Param>, fn(&Param) -> &[u8]>;
+    type IntoIter = std::iter::Map<ParamListIter<'a>, fn(&'a [u8]) -> &'a [u8]>;
     fn into_iter(self) -> Self::IntoIter {
-        self.params.iter().map(|p| p.as_slice())
+        self.params.iter().map(|p| p as &[u8])
     }
 }
 
 impl<'a> IntoIterator for &ParamBuf<'a> {
     type Item = &'a [u8];
-    type IntoIter = Map<std::slice::Iter<'a, Param>, fn(&Param) -> &[u8]>;
+    type IntoIter = std::iter::Map<ParamListIter<'a>, fn(&'a [u8]) -> &'a [u8]>;
     fn into_iter(self) -> Self::IntoIter {
-        self.params.iter().map(|p| p.as_slice())
+        self.params.iter().map(|p| p as &[u8])
     }
 }
 
@@ -187,12 +466,12 @@ impl<'a> ParamBuf<'a> {
     }
 
     pub fn get(&self, index: usize) -> Option<&[u8]> {
-        self.params.get(index).map(|p| p.as_slice())
+        self.params.get(index)
     }
 
     pub fn try_parse<T: std::str::FromStr>(&self, index: usize) -> Option<T> {
         self.params.get(index).and_then(|p| {
-            std::str::from_utf8(p.as_slice())
+            std::str::from_utf8(p)
                 .ok()
                 .and_then(|s| s.parse::<T>().ok())
         })
@@ -200,12 +479,18 @@ impl<'a> ParamBuf<'a> {
 
     pub fn to_owned(&self) -> ParamBufOwned {
         ParamBufOwned {
-            params: self.params.iter().cloned().collect(),
+            params: *self.params,
         }
     }
 
+    /// Whether any parameter bytes were dropped by the capacity limits; see
+    /// the [`ParamBuf`] documentation.
+    pub fn overflowed(&self) -> bool {
+        self.params.overflowed()
+    }
+
     pub fn byte_len(&self) -> usize {
-        self.params.iter().map(|p| p.len()).sum::<usize>() + self.params.len().saturating_sub(1)
+        self.params.byte_len()
     }
 
     pub fn numeric(&self) -> NumericParamBuf<'a> {
@@ -214,6 +499,44 @@ impl<'a> ParamBuf<'a> {
         }
     }
 }
+
+/// Iterator over the parameters of a [`ParamList`] (and thus of
+/// [`ParamBuf`]).
+///
+/// This type is nameable so that a matching iterator can be written against
+/// [`ParamBuf`] in downstream signatures; use `ParamList::iter` or
+/// `ParamBuf::into_iter` to construct one.
+pub struct ParamListIter<'a> {
+    list: &'a ParamList,
+    index: usize,
+    offset: usize,
+}
+
+impl<'a> Iterator for ParamListIter<'a> {
+    type Item = &'a [u8];
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index >= self.list.count as usize {
+            return None;
+        }
+        let len = self.list.lens[self.index] as usize;
+        let param = &self.list.data[self.offset..self.offset + len];
+        self.index += 1;
+        self.offset += len;
+        Some(param)
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.list.count as usize - self.index;
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for ParamListIter<'_> {}
+
+impl std::iter::FusedIterator for ParamListIter<'_> {}
 
 /// A view into a [`Param`] that contains only numeric parameters.
 #[derive(Debug, Copy, Clone, Default)]
@@ -289,16 +612,14 @@ impl<'a> IntoIterator for NumericParam<'a> {
 /// Empty parameters are interpreted as `None`.
 #[derive(Debug, Copy, Clone)]
 pub struct NumericParamBuf<'a> {
-    pub(crate) params: &'a Params,
+    pub(crate) params: &'a ParamList,
 }
 
 impl<'a> IntoIterator for NumericParamBuf<'a> {
     type Item = NumericParam<'a>;
-    type IntoIter = Map<std::slice::Iter<'a, Param>, fn(&'a Param) -> NumericParam<'a>>;
+    type IntoIter = std::iter::Map<ParamListIter<'a>, fn(&'a [u8]) -> NumericParam<'a>>;
     fn into_iter(self) -> Self::IntoIter {
-        self.params.iter().map(|p| NumericParam {
-            param: p.as_slice(),
-        })
+        self.params.iter().map(|p| NumericParam { param: p })
     }
 }
 
@@ -327,9 +648,7 @@ impl<'a> NumericParamBuf<'a> {
     }
 
     pub fn get(&self, index: usize) -> Option<NumericParam<'a>> {
-        self.params.get(index).map(|p| NumericParam {
-            param: p.as_slice(),
-        })
+        self.params.get(index).map(|p| NumericParam { param: p })
     }
 
     pub fn first(&self) -> Option<NumericParam<'a>> {
@@ -810,25 +1129,73 @@ impl<'a> VTEvent<'a> {
     }
 }
 
+/// Owned parameters of an escape sequence, as stored on [`VTOwnedEvent`].
+///
+/// This is the owned counterpart of [`ParamBuf`] and shares its fixed-capacity
+/// storage (and therefore its clamping limits, see [`ParamBuf`]). It is a
+/// convenience type: like other `to_owned()` data, it is intended for use
+/// outside the parsing hot path.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct ParamBufOwned {
-    pub(crate) params: Params,
+    pub(crate) params: ParamList,
 }
+
+/// An owning iterator over the parameters of a [`ParamBufOwned`].
+///
+/// Each parameter is copied into a fixed-capacity [`Param`], which stays
+/// inline (and thus allocation-free) because parameters are capped at
+/// [`MAX_PARAM_LEN`] bytes.
+pub struct ParamBufOwnedIter {
+    list: ParamList,
+    index: usize,
+    offset: usize,
+}
+
+impl Iterator for ParamBufOwnedIter {
+    type Item = Param;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index >= self.list.count as usize {
+            return None;
+        }
+        let len = self.list.lens[self.index] as usize;
+        let mut param = Param::EMPTY;
+        param.extend_from_slice(&self.list.data[self.offset..self.offset + len]);
+        self.index += 1;
+        self.offset += len;
+        Some(param)
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.list.count as usize - self.index;
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for ParamBufOwnedIter {}
+
+impl std::iter::FusedIterator for ParamBufOwnedIter {}
 
 impl IntoIterator for ParamBufOwned {
     type Item = Param;
-    type IntoIter = <Params as IntoIterator>::IntoIter;
+    type IntoIter = ParamBufOwnedIter;
     fn into_iter(self) -> Self::IntoIter {
-        self.params.into_iter()
+        ParamBufOwnedIter {
+            list: self.params,
+            index: 0,
+            offset: 0,
+        }
     }
 }
 
 impl<'b> IntoIterator for &'b ParamBufOwned {
     type Item = &'b [u8];
-    type IntoIter = Map<std::slice::Iter<'b, Param>, fn(&Param) -> &[u8]>;
+    type IntoIter = ParamListIter<'b>;
     fn into_iter(self) -> Self::IntoIter {
-        self.params.iter().map(|p| p.as_slice())
+        self.params.iter()
     }
 }
 
@@ -836,15 +1203,20 @@ impl ParamBufOwned {
     /// Create an empty `ParamBufOwned`.
     pub const fn empty() -> Self {
         Self {
-            params: SmallVec::new_const(),
+            params: ParamList::EMPTY,
         }
     }
 
     /// Create a `ParamBufOwned` from a slice of slices.
+    ///
+    /// Parameters beyond the [`ParamBuf`] capacity limits are clamped; see the
+    /// [`ParamBuf`] documentation for the exact semantics.
     pub fn new(params: &[&[u8]]) -> Self {
-        Self {
-            params: params.iter().map(|p| Param::from(*p)).collect(),
+        let mut list = ParamList::EMPTY;
+        for param in params {
+            list.push_param(param);
         }
+        Self { params: list }
     }
 
     pub fn len(&self) -> usize {
@@ -856,15 +1228,21 @@ impl ParamBufOwned {
     }
 
     pub fn get(&self, index: usize) -> Option<&[u8]> {
-        self.params.get(index).map(|p| p.as_slice())
+        self.params.get(index)
     }
 
     pub fn try_parse<T: std::str::FromStr>(&self, index: usize) -> Option<T> {
         self.params.get(index).and_then(|p| {
-            std::str::from_utf8(p.as_slice())
+            std::str::from_utf8(p)
                 .ok()
                 .and_then(|s| s.parse::<T>().ok())
         })
+    }
+
+    /// Whether any parameter bytes were dropped by the capacity limits; see
+    /// the [`ParamBuf`] documentation.
+    pub fn overflowed(&self) -> bool {
+        self.params.overflowed()
     }
 
     pub fn borrow(&self) -> ParamBuf<'_> {
