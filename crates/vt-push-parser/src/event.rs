@@ -497,8 +497,6 @@ impl<'a> ParamSource<'a> {
 
 impl PartialEq for ParamSource<'_> {
     fn eq(&self, other: &Self) -> bool {
-        // Compare the logical contents only: an inline list and an owned
-        // buffer holding the same parameters are equal.
         self.iter().eq(other.iter())
     }
 }
