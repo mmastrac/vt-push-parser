@@ -1370,10 +1370,6 @@ impl ParamBufOwned {
 }
 
 /// An owning iterator over the parameters of a [`ParamBufOwned`].
-///
-/// Each parameter is copied into a fixed-capacity [`Param`], which stays
-/// inline (and thus allocation-free) because parameters are capped at
-/// [`MAX_PARAM_LEN`] bytes.
 pub struct ParamBufOwnedIter {
     data: Box<[u8]>,
     lens: Box<[u8]>,
