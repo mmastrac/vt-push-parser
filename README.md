@@ -4,11 +4,13 @@
 
 A streaming push parser for the VT protocol.
 
-There are a number of crates in this project:
+| Crate | Description | crates.io | docs.rs | Source |
+|-------|-------------|-----------|---------|--------|
+| `vt-push-parser` | Streaming VT push parser with input event parsing | [![crates.io](https://img.shields.io/crates/v/vt-push-parser)](https://crates.io/crates/vt-push-parser) | [![docs.rs](https://img.shields.io/docsrs/vt-push-parser)](https://docs.rs/vt-push-parser) | [vt-push-parser/](vt-push-parser/) |
+| `fast-strip-ansi` | Fast ANSI escape sequence stripper | [![crates.io](https://img.shields.io/crates/v/fast-strip-ansi)](https://crates.io/crates/fast-strip-ansi) | [![docs.rs](https://img.shields.io/docsrs/fast-strip-ansi)](https://docs.rs/fast-strip-ansi) | [fast-strip-ansi/](fast-strip-ansi/) |
+| `vt-input-push-parser` | Input event parser for VT sequences | [![crates.io](https://img.shields.io/crates/v/vt-input-push-parser)](https://crates.io/crates/vt-input-push-parser) | [![docs.rs](https://img.shields.io/docsrs/vt-input-push-parser)](https://docs.rs/vt-input-push-parser) | [vt-input-push-parser/](vt-input-push-parser/) |
 
- - [`vt-push-parser`](crates/vt-push-parser): A streaming push parser for the VT protocol.
- - [`vt-input-push-parser`](crates/vt-input-push-parser): A streaming push parser for VT input events.
- - [`fast-strip-ansi`](crates/fast-strip-ansi): A performance-optimized, low-allocation ANSI escape sequence stripper based on the `vt-push-parser` crate.
+All three crates are at version 0.15.0.
 
 ## Benchmarks
 
