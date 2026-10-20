@@ -1,0 +1,22 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.15.0] - 2025-10-20
+
+### Changed
+- **Core parser**: Fixed-capacity inline parameter storage (#15) — `ParamBufOwned` reduced from 1158 to 40 bytes, `Box<[u8]>` owned params, 45 new tests added
+- **Benchmarking**: Added CodSpeed continuous benchmarking (#12)
+
+## [0.14.0] - 2025-10-20
+
+### Changed
+- Bump workspace version 0.13.1 → 0.14.0 (#14)
+
+## [0.13.1] - 2025-10-20
+
+### Fixed
+- `finish()`: flush held ESC as data and cancel in-flight OSC/DCS strings (#13)
