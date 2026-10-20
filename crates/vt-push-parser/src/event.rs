@@ -296,8 +296,11 @@ impl ParamList {
     /// The collected parameters, as byte slices.
     #[inline]
     pub fn iter(&self) -> ParamListIter<'_> {
+        let (data, lens, count) = ParamSource::Inline(self).parts();
         ParamListIter {
-            list: self,
+            data,
+            lens,
+            count,
             index: 0,
             offset: 0,
         }
@@ -418,6 +421,116 @@ impl serde::Serialize for ParamList {
 
 static EMPTY_PARAMS: ParamList = ParamList::EMPTY;
 
+/// The parameter storage backing a [`ParamBuf`]: either the parser's inline
+/// [`ParamList`] or the content-sized heap storage of a [`ParamBufOwned`].
+#[derive(Copy, Clone)]
+pub(crate) enum ParamSource<'a> {
+    Inline(&'a ParamList),
+    Owned(&'a ParamBufOwned),
+}
+
+impl<'a> ParamSource<'a> {
+    /// The concatenated parameter bytes, the per-parameter lengths and the
+    /// parameter count.
+    #[inline]
+    fn parts(self) -> (&'a [u8], &'a [u8], usize) {
+        match self {
+            ParamSource::Inline(list) => (
+                &list.data[..list.used as usize],
+                &list.lens[..list.count as usize],
+                list.count as usize,
+            ),
+            ParamSource::Owned(owned) => (
+                owned.data.as_deref().unwrap_or(&[]),
+                owned.lens.as_deref().unwrap_or(&[]),
+                owned.lens.as_ref().map_or(0, |lens| lens.len()),
+            ),
+        }
+    }
+
+    #[inline]
+    fn len(self) -> usize {
+        self.parts().2
+    }
+
+    #[inline]
+    fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+
+    #[inline]
+    fn overflowed(self) -> bool {
+        match self {
+            ParamSource::Inline(list) => list.overflowed(),
+            ParamSource::Owned(owned) => owned.overflowed,
+        }
+    }
+
+    fn get(self, index: usize) -> Option<&'a [u8]> {
+        let (data, lens, count) = self.parts();
+        if index >= count {
+            return None;
+        }
+        let offset: usize = lens[..index].iter().map(|&len| len as usize).sum();
+        let len = lens[index] as usize;
+        Some(&data[offset..offset + len])
+    }
+
+    #[inline]
+    fn byte_len(self) -> usize {
+        let (data, _, count) = self.parts();
+        data.len() + count.saturating_sub(1)
+    }
+
+    #[inline]
+    fn iter(self) -> ParamListIter<'a> {
+        let (data, lens, count) = self.parts();
+        ParamListIter {
+            data,
+            lens,
+            count,
+            index: 0,
+            offset: 0,
+        }
+    }
+}
+
+impl PartialEq for ParamSource<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.iter().eq(other.iter())
+    }
+}
+
+impl Eq for ParamSource<'_> {}
+
+impl std::hash::Hash for ParamSource<'_> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Mirror `PartialEq`: hash the logical contents only.
+        self.len().hash(state);
+        for param in self.iter() {
+            param.hash(state);
+        }
+    }
+}
+
+impl std::fmt::Debug for ParamSource<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for ParamSource<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = serializer.serialize_seq(Some(self.len()))?;
+        for param in self.iter() {
+            seq.serialize_element(param)?;
+        }
+        seq.end()
+    }
+}
+
 /// The parameters of an escape sequence (CSI/DCS), as emitted by the parser.
 ///
 /// Parameters are buffered by the parser because sequences may be split
@@ -427,11 +540,15 @@ static EMPTY_PARAMS: ParamList = ParamList::EMPTY;
 /// - at most [`MAX_PARAMS`] parameters;
 /// - at most [`MAX_PARAM_LEN`] bytes per parameter;
 /// - at most [`MAX_PARAM_BYTES`] parameter bytes (separators excluded);
+///
+/// A `ParamBuf` either borrows the parser's inline storage or the
+/// content-sized storage of a [`ParamBufOwned`] (see [`ParamBufOwned::borrow`]);
+/// the limits above apply to both.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct ParamBuf<'a> {
-    pub(crate) params: &'a ParamList,
+    pub(crate) params: ParamSource<'a>,
 }
 
 impl<'a> IntoIterator for ParamBuf<'a> {
@@ -453,7 +570,14 @@ impl<'a> IntoIterator for &ParamBuf<'a> {
 impl<'a> ParamBuf<'a> {
     pub const fn empty() -> Self {
         ParamBuf {
-            params: &EMPTY_PARAMS,
+            params: ParamSource::Inline(&EMPTY_PARAMS),
+        }
+    }
+
+    /// A view over the parser's inline parameter storage.
+    pub(crate) const fn from_param_list(list: &'a ParamList) -> Self {
+        ParamBuf {
+            params: ParamSource::Inline(list),
         }
     }
 
@@ -478,8 +602,9 @@ impl<'a> ParamBuf<'a> {
     }
 
     pub fn to_owned(&self) -> ParamBufOwned {
-        ParamBufOwned {
-            params: *self.params,
+        match self.params {
+            ParamSource::Inline(list) => ParamBufOwned::from_param_list(list),
+            ParamSource::Owned(owned) => owned.clone(),
         }
     }
 
@@ -500,14 +625,19 @@ impl<'a> ParamBuf<'a> {
     }
 }
 
-/// Iterator over the parameters of a [`ParamList`] (and thus of
-/// [`ParamBuf`]).
+/// Iterator over the parameters of a [`ParamList`] (and thus of [`ParamBuf`]
+/// and [`ParamBufOwned`]).
 ///
 /// This type is nameable so that a matching iterator can be written against
-/// [`ParamBuf`] in downstream signatures; use `ParamList::iter` or
-/// `ParamBuf::into_iter` to construct one.
+/// [`ParamBuf`] in downstream signatures; use `ParamList::iter`,
+/// `ParamBuf::into_iter` or `&ParamBufOwned::into_iter` to construct one.
 pub struct ParamListIter<'a> {
-    list: &'a ParamList,
+    /// Concatenated parameter bytes.
+    data: &'a [u8],
+    /// Length of each parameter.
+    lens: &'a [u8],
+    /// Number of parameters.
+    count: usize,
     index: usize,
     offset: usize,
 }
@@ -517,11 +647,11 @@ impl<'a> Iterator for ParamListIter<'a> {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        if self.index >= self.list.count as usize {
+        if self.index >= self.count {
             return None;
         }
-        let len = self.list.lens[self.index] as usize;
-        let param = &self.list.data[self.offset..self.offset + len];
+        let len = self.lens[self.index] as usize;
+        let param = &self.data[self.offset..self.offset + len];
         self.index += 1;
         self.offset += len;
         Some(param)
@@ -529,7 +659,7 @@ impl<'a> Iterator for ParamListIter<'a> {
 
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.list.count as usize - self.index;
+        let remaining = self.count - self.index;
         (remaining, Some(remaining))
     }
 }
@@ -612,7 +742,7 @@ impl<'a> IntoIterator for NumericParam<'a> {
 /// Empty parameters are interpreted as `None`.
 #[derive(Debug, Copy, Clone)]
 pub struct NumericParamBuf<'a> {
-    pub(crate) params: &'a ParamList,
+    pub(crate) params: ParamSource<'a>,
 }
 
 impl<'a> IntoIterator for NumericParamBuf<'a> {
@@ -626,7 +756,7 @@ impl<'a> IntoIterator for NumericParamBuf<'a> {
 impl<'a> NumericParamBuf<'a> {
     pub const fn empty() -> Self {
         NumericParamBuf {
-            params: &EMPTY_PARAMS,
+            params: ParamSource::Inline(&EMPTY_PARAMS),
         }
     }
 
@@ -1131,23 +1261,118 @@ impl<'a> VTEvent<'a> {
 
 /// Owned parameters of an escape sequence, as stored on [`VTOwnedEvent`].
 ///
-/// This is the owned counterpart of [`ParamBuf`] and shares its fixed-capacity
-/// storage (and therefore its clamping limits, see [`ParamBuf`]). It is a
+/// This is the owned counterpart of [`ParamBuf`]. Unlike the parser's
+/// fixed-capacity inline storage (see [`ParamBuf`]), it is sized to its
+/// contents on the heap, so an owned copy of a small parameter list is
+/// small; the limits documented on [`ParamBuf`] apply as before. It is a
 /// convenience type: like other `to_owned()` data, it is intended for use
 /// outside the parsing hot path.
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+///
+/// Holding no parameters is allocation-free.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct ParamBufOwned {
-    pub(crate) params: ParamList,
+    pub(crate) data: Option<Box<[u8]>>,
+    pub(crate) lens: Option<Box<[u8]>>,
+    pub(crate) overflowed: bool,
+}
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for ParamBufOwned {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(1))?;
+        map.serialize_entry("params", &ParamSource::Owned(self))?;
+        map.end()
+    }
+}
+
+impl ParamBufOwned {
+    /// An owned copy of the logical contents of a [`ParamList`].
+    pub(crate) fn from_param_list(list: &ParamList) -> Self {
+        if list.count == 0 {
+            return Self::EMPTY;
+        }
+        let data = &list.data[..list.used as usize];
+        let lens = &list.lens[..list.count as usize];
+        Self {
+            data: Some(data.to_vec().into_boxed_slice()),
+            lens: Some(lens.to_vec().into_boxed_slice()),
+            overflowed: list.overflowed,
+        }
+    }
+
+    /// Empty `ParamBufOwned` with no allocation.
+    pub const EMPTY: Self = Self {
+        data: None,
+        lens: None,
+        overflowed: false,
+    };
+
+    /// Create an empty `ParamBufOwned`.
+    pub const fn empty() -> Self {
+        Self::EMPTY
+    }
+
+    /// Create a `ParamBufOwned` from a slice of slices.
+    ///
+    /// Parameters beyond the [`ParamBuf`] capacity limits are clamped; see the
+    /// [`ParamBuf`] documentation for the exact semantics.
+    pub fn new(params: &[&[u8]]) -> Self {
+        let mut list = ParamList::EMPTY;
+        for param in params {
+            list.push_param(param);
+        }
+        Self::from_param_list(&list)
+    }
+
+    pub fn len(&self) -> usize {
+        self.lens.as_ref().map_or(0, |lens| lens.len())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn get(&self, index: usize) -> Option<&[u8]> {
+        ParamSource::Owned(self).get(index)
+    }
+
+    pub fn try_parse<T: std::str::FromStr>(&self, index: usize) -> Option<T> {
+        self.get(index).and_then(|p| {
+            std::str::from_utf8(p)
+                .ok()
+                .and_then(|s| s.parse::<T>().ok())
+        })
+    }
+
+    /// Whether any parameter bytes were dropped by the capacity limits; see
+    /// the [`ParamBuf`] documentation.
+    pub fn overflowed(&self) -> bool {
+        self.overflowed
+    }
+
+    /// The number of parameter bytes (excluding `;` separators).
+    pub fn byte_len(&self) -> usize {
+        ParamSource::Owned(self).byte_len()
+    }
+
+    pub fn borrow(&self) -> ParamBuf<'_> {
+        ParamBuf {
+            params: ParamSource::Owned(self),
+        }
+    }
+
+    pub fn numeric(&self) -> NumericParamBuf<'_> {
+        NumericParamBuf {
+            params: ParamSource::Owned(self),
+        }
+    }
 }
 
 /// An owning iterator over the parameters of a [`ParamBufOwned`].
-///
-/// Each parameter is copied into a fixed-capacity [`Param`], which stays
-/// inline (and thus allocation-free) because parameters are capped at
-/// [`MAX_PARAM_LEN`] bytes.
 pub struct ParamBufOwnedIter {
-    list: ParamList,
+    data: Box<[u8]>,
+    lens: Box<[u8]>,
     index: usize,
     offset: usize,
 }
@@ -1157,12 +1382,12 @@ impl Iterator for ParamBufOwnedIter {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        if self.index >= self.list.count as usize {
+        if self.index >= self.lens.len() {
             return None;
         }
-        let len = self.list.lens[self.index] as usize;
+        let len = self.lens[self.index] as usize;
         let mut param = Param::EMPTY;
-        param.extend_from_slice(&self.list.data[self.offset..self.offset + len]);
+        param.extend_from_slice(&self.data[self.offset..self.offset + len]);
         self.index += 1;
         self.offset += len;
         Some(param)
@@ -1170,7 +1395,7 @@ impl Iterator for ParamBufOwnedIter {
 
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.list.count as usize - self.index;
+        let remaining = self.lens.len() - self.index;
         (remaining, Some(remaining))
     }
 }
@@ -1184,7 +1409,8 @@ impl IntoIterator for ParamBufOwned {
     type IntoIter = ParamBufOwnedIter;
     fn into_iter(self) -> Self::IntoIter {
         ParamBufOwnedIter {
-            list: self.params,
+            data: self.data.unwrap_or_default(),
+            lens: self.lens.unwrap_or_default(),
             index: 0,
             offset: 0,
         }
@@ -1195,66 +1421,7 @@ impl<'b> IntoIterator for &'b ParamBufOwned {
     type Item = &'b [u8];
     type IntoIter = ParamListIter<'b>;
     fn into_iter(self) -> Self::IntoIter {
-        self.params.iter()
-    }
-}
-
-impl ParamBufOwned {
-    /// Create an empty `ParamBufOwned`.
-    pub const fn empty() -> Self {
-        Self {
-            params: ParamList::EMPTY,
-        }
-    }
-
-    /// Create a `ParamBufOwned` from a slice of slices.
-    ///
-    /// Parameters beyond the [`ParamBuf`] capacity limits are clamped; see the
-    /// [`ParamBuf`] documentation for the exact semantics.
-    pub fn new(params: &[&[u8]]) -> Self {
-        let mut list = ParamList::EMPTY;
-        for param in params {
-            list.push_param(param);
-        }
-        Self { params: list }
-    }
-
-    pub fn len(&self) -> usize {
-        self.params.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.params.is_empty()
-    }
-
-    pub fn get(&self, index: usize) -> Option<&[u8]> {
-        self.params.get(index)
-    }
-
-    pub fn try_parse<T: std::str::FromStr>(&self, index: usize) -> Option<T> {
-        self.params.get(index).and_then(|p| {
-            std::str::from_utf8(p)
-                .ok()
-                .and_then(|s| s.parse::<T>().ok())
-        })
-    }
-
-    /// Whether any parameter bytes were dropped by the capacity limits; see
-    /// the [`ParamBuf`] documentation.
-    pub fn overflowed(&self) -> bool {
-        self.params.overflowed()
-    }
-
-    pub fn borrow(&self) -> ParamBuf<'_> {
-        ParamBuf {
-            params: &self.params,
-        }
-    }
-
-    pub fn numeric(&self) -> NumericParamBuf<'_> {
-        NumericParamBuf {
-            params: &self.params,
-        }
+        ParamSource::Owned(self).iter()
     }
 }
 
@@ -1545,5 +1712,141 @@ mod test {
                 .unwrap(),
             &[1, 2, 3]
         );
+    }
+
+    #[test]
+    fn param_buf_owned_is_content_sized() {
+        // No parameters: no heap storage at all.
+        let empty = ParamBufOwned::new(&[]);
+        assert!(empty.data.is_none());
+        assert!(empty.lens.is_none());
+        assert!(empty.is_empty());
+        assert_eq!(empty.len(), 0);
+
+        // A small parameter list is stored in small heap allocations: the
+        // bytes actually used ("1234" + "5"), not the parser's full inline
+        // arena (MAX_PARAMS x MAX_PARAM_LEN).
+        let small = ParamBufOwned::new(&[b"1234", b"5"]);
+        assert_eq!(small.data.as_deref(), Some(&b"12345"[..]));
+        assert_eq!(small.lens.as_deref(), Some(&[4, 1][..]));
+        assert_eq!(small.len(), 2);
+        assert_eq!(small.byte_len(), 6); // 5 bytes + 1 separator
+        assert!(!small.overflowed());
+
+        // Storing many parameters still only stores what was collected.
+        let strings: Vec<String> = (0..MAX_PARAMS as u32).map(|i| i.to_string()).collect();
+        let slices: Vec<&[u8]> = strings.iter().map(|s| s.as_bytes()).collect();
+        let many = ParamBufOwned::new(&slices);
+        assert_eq!(many.len(), MAX_PARAMS);
+        assert_eq!(many.get(0), Some(&b"0"[..]));
+        assert_eq!(many.get(127), Some(&b"127"[..]));
+        assert_eq!(many.byte_len(), 10 + 90 * 2 + 28 * 3 + 127);
+    }
+
+    #[test]
+    fn param_buf_owned_clamps_like_param_buf() {
+        // Clamping applies to `ParamBufOwned::new` exactly as it does to the
+        // parser: bytes past MAX_PARAM_LEN are dropped, params past the
+        // sequence caps are dropped, and `overflowed()` reports both.
+        let long = ParamBufOwned::new(&[&[b'7'; MAX_PARAM_LEN + 8][..]]);
+        assert_eq!(long.len(), 1);
+        assert_eq!(long.get(0).map(<[u8]>::len), Some(MAX_PARAM_LEN));
+        assert!(long.overflowed());
+
+        let too_many_strings: Vec<String> = (0..(MAX_PARAMS + 8) as u32)
+            .map(|i| i.to_string())
+            .collect();
+        let too_many_slices: Vec<&[u8]> = too_many_strings.iter().map(|s| s.as_bytes()).collect();
+        let too_many = ParamBufOwned::new(&too_many_slices);
+        assert_eq!(too_many.len(), MAX_PARAMS);
+        assert!(too_many.overflowed());
+
+        // `ParamBuf::empty` and `ParamBufOwned::empty` agree.
+        assert!(ParamBuf::empty().to_owned().is_empty());
+        assert_eq!(ParamBuf::empty().to_owned(), ParamBufOwned::empty());
+    }
+
+    #[test]
+    fn param_buf_owned_views_match_parser_views() {
+        // A view over owned storage behaves exactly like a view over the
+        // parser's inline storage holding the same parameters.
+        let owned = ParamBufOwned::new(&[b"1", b"22", b""]);
+
+        let mut list = ParamList::EMPTY;
+        list.push_param(b"1");
+        list.push_param(b"22");
+        list.push_param(b"");
+        let view = ParamBuf::from_param_list(&list);
+
+        assert_eq!(owned.borrow(), view);
+        assert_eq!(owned.borrow().len(), view.len());
+        assert_eq!(owned.borrow().byte_len(), view.byte_len());
+        assert_eq!(
+            owned.numeric().try_write(&mut [0; 4]).unwrap(),
+            view.numeric().try_write(&mut [0; 4]).unwrap()
+        );
+        assert_eq!(
+            owned.borrow().into_iter().collect::<Vec<_>>(),
+            view.into_iter().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            (&owned).into_iter().collect::<Vec<_>>(),
+            view.into_iter().collect::<Vec<_>>()
+        );
+        assert_eq!(format!("{:?}", owned.borrow()), format!("{:?}", view));
+
+        // `to_owned` of an owned-backed view is a deep copy.
+        let copy = owned.borrow().to_owned();
+        assert_eq!(copy, owned);
+        assert_eq!(copy.get(1), Some(&b"22"[..]));
+
+        // The owning iterator yields the same parameters as `Param`s.
+        fn param(bytes: &[u8]) -> Param {
+            let mut p = Param::EMPTY;
+            p.extend_from_slice(bytes);
+            p
+        }
+        assert_eq!(
+            owned.into_iter().collect::<Vec<_>>(),
+            vec![param(b"1"), param(b"22"), Param::EMPTY]
+        );
+    }
+
+    #[test]
+    fn param_buf_owned_overflowed_from_parser() {
+        // Overflow survives the inline -> owned copy.
+        let mut list = ParamList::EMPTY;
+        list.push_param(&[b'7'; MAX_PARAM_LEN + 8]);
+        list.push_param(b"1");
+        let owned = ParamBuf::from_param_list(&list).to_owned();
+        assert!(owned.overflowed());
+        assert_eq!(owned.len(), 2);
+        assert_eq!(owned.get(0).map(<[u8]>::len), Some(MAX_PARAM_LEN));
+
+        // No overflow in the source, no overflow in the copy.
+        let mut list = ParamList::EMPTY;
+        list.push_param(b"1");
+        let owned = ParamBuf::from_param_list(&list).to_owned();
+        assert!(!owned.overflowed());
+    }
+
+    #[test]
+    fn owned_param_size_is_pointer_sized_per_field() {
+        // The owned buffer's inline footprint is two boxed slices (fat
+        // pointers) plus a flag: a few words, far below the inline arena it
+        // used to embed (lens + data + counts ~ 1.1 KiB).
+        assert!(std::mem::size_of::<ParamBufOwned>() <= 5 * std::mem::size_of::<usize>());
+        assert!(std::mem::size_of::<ParamList>() > 1024);
+        assert!(std::mem::size_of::<ParamBufOwned>() * 16 < std::mem::size_of::<ParamList>());
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn param_buf_owned_serde_shape_unchanged() {
+        // The serialized shape is the same as before the `Box<[u8]>` change:
+        // a map with a single "params" key holding the sequence.
+        let owned = ParamBufOwned::new(&[b"1", b"22"]);
+        let json = serde_json::to_string(&owned).unwrap();
+        assert_eq!(json, r#"{"params":[[49],[50,50]]}"#);
     }
 }
