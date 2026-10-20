@@ -1280,8 +1280,6 @@ pub struct ParamBufOwned {
 impl serde::Serialize for ParamBufOwned {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
-        // Same shape as when this wrapped a `ParamList` by value: a map with
-        // one `"params"` key holding the sequence of parameters.
         let mut map = serializer.serialize_map(Some(1))?;
         map.serialize_entry("params", &ParamSource::Owned(self))?;
         map.end()
