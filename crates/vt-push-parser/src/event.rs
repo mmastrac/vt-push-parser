@@ -1303,8 +1303,7 @@ impl ParamBufOwned {
         }
     }
 
-    /// An empty `ParamBufOwned`; allocates nothing. `const`-callable and
-    /// usable in statics.
+    /// Empty `ParamBufOwned` with no allocation.
     pub const EMPTY: Self = Self {
         data: None,
         lens: None,
