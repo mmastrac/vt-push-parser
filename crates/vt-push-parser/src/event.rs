@@ -1291,9 +1291,7 @@ impl serde::Serialize for ParamBufOwned {
 }
 
 impl ParamBufOwned {
-    /// An owned copy of the logical contents of a [`ParamList`], allocated
-    /// to fit exactly what was collected (crate-internal: the parser's
-    /// inline list).
+    /// An owned copy of the logical contents of a [`ParamList`].
     pub(crate) fn from_param_list(list: &ParamList) -> Self {
         if list.count == 0 {
             return Self::EMPTY;
