@@ -4,7 +4,7 @@ use pretty_assertions::assert_eq;
 use vt_push_parser::VTPushParser;
 use vt_push_parser::event::{VTEvent, VTOwnedEvent};
 
-/// Feed `input` in one go and collect the owned events.
+/// Feed `input` at once, collect the owned events.
 fn events(input: &[u8]) -> Vec<VTOwnedEvent> {
     let mut parser = VTPushParser::new();
     let mut events = Vec::new();
@@ -12,7 +12,7 @@ fn events(input: &[u8]) -> Vec<VTOwnedEvent> {
     events
 }
 
-/// The `(data, used_bel)` of every `OscEnd` emitted for `input`.
+/// Every `OscEnd`'s `(data, used_bel)` for `input`.
 fn osc_ends(input: &[u8]) -> Vec<(Vec<u8>, bool)> {
     events(input)
         .into_iter()
@@ -28,27 +28,25 @@ const EMPTY_ST: (Vec<u8>, bool) = (Vec::new(), false);
 
 #[test]
 fn empty_osc_after_introducer() {
-    // ESC ] BEL: `data` used to be the introducer (`ESC ]`).
+    // ESC ] BEL: `data` was the introducer.
     assert_eq!(osc_ends(b"\x1b]\x07"), vec![EMPTY_BEL]);
 }
 
 #[test]
 fn empty_osc_after_raw() {
-    // abc ESC ] BEL: `data` used to be `abc ESC ]`.
+    // `data` was `abc ESC ]`.
     assert_eq!(osc_ends(b"abc\x1b]\x07"), vec![EMPTY_BEL]);
 }
 
 #[test]
 fn empty_osc_after_csi() {
-    // ESC [1m ESC ] BEL: `data` used to be `ESC [1m ESC ]`.
+    // `data` was `ESC [1m ESC ]`.
     assert_eq!(osc_ends(b"\x1b[1m\x1b]\x07"), vec![EMPTY_BEL]);
 }
 
 #[test]
 fn empty_osc_after_previous_osc() {
-    // ESC ]0;A BEL ESC ] BEL: the second `data` used to repeat the first
-    // payload, then the BEL and the introducer: the start of the slice was
-    // stale, not merely off by the introducer.
+    // Second `data` repeated the first payload, slice start was stale.
     assert_eq!(
         osc_ends(b"\x1b]0;A\x07\x1b]\x07"),
         vec![(b"0;A".to_vec(), true), EMPTY_BEL]
@@ -62,8 +60,7 @@ fn empty_osc_after_previous_osc() {
 
 #[test]
 fn empty_osc_terminated_by_st() {
-    // The ST forms: a held ESC set the slice start, so these were already
-    // right, but they pin the behaviour down alongside the BEL forms.
+    // ST forms: held ESC set the start already.
     assert_eq!(osc_ends(b"\x1b]\x1b\\"), vec![EMPTY_ST]);
     assert_eq!(osc_ends(b"abc\x1b]\x1b\\"), vec![EMPTY_ST]);
     assert_eq!(
@@ -74,8 +71,7 @@ fn empty_osc_terminated_by_st() {
 
 #[test]
 fn empty_dcs_payload_reports_empty_data() {
-    // DcsEnd used the same stale-index pattern. An empty DCS payload always
-    // terminates through a held ESC, so it was correct by accident; keep it so.
+    // Same pattern, correct only via the held ESC.
     let dcs_ends = |input: &[u8]| {
         events(input)
             .into_iter()
@@ -95,7 +91,7 @@ fn empty_dcs_payload_reports_empty_data() {
 
 #[test]
 fn non_empty_osc_payload_is_unaffected() {
-    // Control cases: these were already correct before the fix.
+    // Control cases, already correct before the fix.
     assert_eq!(osc_ends(b"abc\x1b]A\x07"), vec![(b"A".to_vec(), true)]);
     assert_eq!(
         osc_ends(b"\x1b]0;title\x07"),
@@ -109,18 +105,13 @@ fn non_empty_osc_payload_is_unaffected() {
 
 #[test]
 fn ignored_c0_bytes_are_not_pulled_into_the_payload() {
-    // C0 bytes other than BEL/ESC inside an OSC string are dropped by the
-    // parser (pre-existing policy, unrelated to this bug). An empty payload
-    // therefore stays empty: it must not reach back over the introducer and
-    // pick up the dropped C0.
+    // C0 bytes inside OSC are dropped (pre-existing policy).
     assert_eq!(osc_ends(b"\x1b]\n\x07"), vec![EMPTY_BEL]);
 }
 
 #[test]
 fn flushed_payload_is_not_repeated_at_the_end() {
-    // A DEL inside the string flushes the buffered payload early. The flush is
-    // the whole payload, so nothing is left for the end: `OscEnd.data` must be
-    // empty instead of repeating what `OscData` already carried.
+    // DEL flushes early, leaving nothing for the end.
     assert_eq!(
         events(b"\x1b]A\x7f\x07"),
         vec![
@@ -134,7 +125,7 @@ fn flushed_payload_is_not_repeated_at_the_end() {
     );
 }
 
-/// Encode the events of `chunks` back into a byte stream.
+/// Encode `chunks`' events back to bytes.
 fn re_encode(chunks: &[&[u8]]) -> Vec<u8> {
     let mut parser = VTPushParser::new();
     let mut out = Vec::new();
@@ -152,13 +143,9 @@ fn re_encode(chunks: &[&[u8]]) -> Vec<u8> {
 
 #[test]
 fn events_re_encode_byte_for_byte() {
-    // Every event must re-encode to the bytes that produced it, so a caller can
-    // rebuild the stream from the events. This is what the empty-payload bug
-    // broke: the duplicated `OscEnd.data` came straight back out of `encode()`.
+    // Re-encoding every event must reproduce the input bytes.
     //
-    // The corpus holds no truncated escape sequence (the parser drops those by
-    // design) and no C0 bytes inside OSC/DCS strings (dropped as well, see
-    // `ignored_c0_bytes_are_not_pulled_into_the_payload`).
+    // Corpus excludes truncated escapes and C0 bytes inside strings.
     let corpus: &[&[u8]] = &[
         b"",
         b"plain text",
@@ -186,9 +173,7 @@ fn events_re_encode_byte_for_byte() {
             "re-encoding {input:02X?} fed whole gave {whole:02X?}"
         );
 
-        // The same input fed one byte at a time. A payload may arrive split
-        // across `OscData`/`DcsData` when the input is chunked (see the
-        // `VTEvent` docs); the bytes and their order must still be identical.
+        // Also fed byte by byte, where payloads may split.
         let chunks: Vec<&[u8]> = input.chunks(1).collect();
         let stepped = re_encode(&chunks);
         assert_eq!(
