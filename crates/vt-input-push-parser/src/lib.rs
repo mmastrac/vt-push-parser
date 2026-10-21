@@ -1050,7 +1050,7 @@ mod tests {
     #[test]
     #[timeout(10_000)]
     fn feed_with_returns_when_a_chunk_ends_mid_escape() {
-        // Split every escape at every point. All hung before.
+        // Split every escape everywhere. All hung before the fix.
         let mut cases = 0;
         for line in ESCAPE_CORPUS.lines() {
             let line = line.trim();
