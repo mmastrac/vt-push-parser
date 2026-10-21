@@ -1094,11 +1094,143 @@ mod tests {
 
     #[test]
     #[timeout(10_000)]
-    fn csi_split_across_feeds_terminates() {
-        // Payload is dropped on some splits. Only termination is pinned.
+    fn csi_split_across_feeds_has_the_whole_event_stream() {
+        // Both `ESC [` and a lone `ESC` at a chunk boundary used to be dropped.
         let bytes = b"\x1b[1;2m";
+        let whole = feed_chunks(vec![bytes.to_vec()]);
+        assert_eq!(whole, ["Csi(Csi('1', '2', '', 'm'))"]);
         for split in 1..bytes.len() {
-            feed_chunks(vec![bytes[..split].to_vec(), bytes[split..].to_vec()]);
+            let split_events = feed_chunks(vec![bytes[..split].to_vec(), bytes[split..].to_vec()]);
+            assert_eq!(split_events, whole, "CSI lost, split at {split}");
         }
+    }
+
+    #[test]
+    #[timeout(10_000)]
+    fn csi_split_three_ways_is_not_lost() {
+        // CSI 15 ~ is surfaced as a raw CSI event, not a key. Split inside
+        // both the introducer and the parameters.
+        let whole = feed_chunks(vec![b"\x1b[15~".to_vec()]);
+        assert_eq!(whole, ["Csi(Csi('15', '', '~'))"]);
+        let three_ways = feed_chunks(vec![b"\x1b".to_vec(), b"[1".to_vec(), b"5~".to_vec()]);
+        assert_eq!(three_ways, whole);
+    }
+
+    #[test]
+    #[timeout(10_000)]
+    fn ss2_and_ss3_split_at_the_introducer_are_not_lost() {
+        for bytes in [b"\x1bOA".as_slice(), b"\x1bNA".as_slice()] {
+            let whole = feed_chunks(vec![bytes.to_vec()]);
+            assert_eq!(whole.len(), 1);
+            for split in 1..bytes.len() {
+                let split_events =
+                    feed_chunks(vec![bytes[..split].to_vec(), bytes[split..].to_vec()]);
+                assert_eq!(split_events, whole, "SS2/SS3 lost, split at {split}");
+            }
+        }
+    }
+
+    #[test]
+    #[timeout(10_000)]
+    fn osc_split_after_the_esc_introducer_is_not_lost() {
+        let bytes = b"\x1b]0;title\x07";
+        let whole = feed_chunks(vec![bytes.to_vec()]);
+        assert_eq!(whole, ["Osc(\"0;title\")"]);
+        let split = feed_chunks(vec![b"\x1b".to_vec(), b"]0;title\x07".to_vec()]);
+        assert_eq!(split, whole);
+    }
+
+    #[test]
+    #[timeout(10_000)]
+    fn dcs_split_after_the_esc_introducer_is_not_lost() {
+        let bytes = b"\x1bP1;2;3|data\x1b\\";
+        let whole = feed_chunks(vec![bytes.to_vec()]);
+        assert_eq!(whole, ["Dcs([100, 97, 116, 97])"]);
+        let split = feed_chunks(vec![b"\x1b".to_vec(), b"P1;2;3|data\x1b\\".to_vec()]);
+        assert_eq!(split, whole);
+    }
+
+    /// True if `split` falls inside a DCS string (after `ESC P`, before its
+    /// terminator). `DcsEnd` payload accumulation is a separate task, so those
+    /// splits cannot be compared event-for-event yet.
+    fn split_inside_dcs(bytes: &[u8], split: usize) -> bool {
+        let mut i = 0;
+        while i < split {
+            if bytes[i] == 0x1b && bytes.get(i + 1) == Some(&b'P') {
+                i += 2;
+                let mut open = true;
+                while i < split {
+                    match bytes[i] {
+                        0x18 | 0x1a => {
+                            open = false;
+                            i += 1;
+                            break;
+                        }
+                        0x1b => {
+                            if bytes.get(i + 1) == Some(&b'\\') && i + 1 < split {
+                                open = false;
+                                i += 2;
+                                break;
+                            }
+                            i += 1;
+                        }
+                        _ => i += 1,
+                    }
+                }
+                if open {
+                    return true;
+                }
+            } else {
+                i += 1;
+            }
+        }
+        false
+    }
+
+    /// Lines that hit a separate pre-existing whole-feed loss: an ignored DCS or
+    /// a CSI cancelled by CAN/SUB resumes to ground without an event the input
+    /// parser forwards, so trailing text in the same feed is swallowed.
+    /// Reported but not fixed here.
+    fn whole_feed_loses_trailing_text(bytes: &[u8]) -> bool {
+        bytes.windows(3).any(|w| w == b"\x1bP:") || bytes.iter().any(|b| matches!(b, 0x18 | 0x1a))
+    }
+
+    #[test]
+    #[timeout(10_000)]
+    fn every_escape_split_has_the_whole_event_stream() {
+        let mut compared = 0;
+        let mut skipped_dcs = 0;
+        let mut skipped_whole_loss = 0;
+        for line in ESCAPE_CORPUS.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let decoded = vt_push_parser::ascii::decode_string(line);
+            if whole_feed_loses_trailing_text(&decoded) {
+                skipped_whole_loss += 1;
+                continue;
+            }
+            let whole = feed_chunks(vec![decoded.clone()]);
+            for split in 1..decoded.len() {
+                if split_inside_dcs(&decoded, split) {
+                    skipped_dcs += 1;
+                    continue;
+                }
+                compared += 1;
+                let split_events =
+                    feed_chunks(vec![decoded[..split].to_vec(), decoded[split..].to_vec()]);
+                assert_eq!(
+                    split_events, whole,
+                    "event stream changed, line {line:?} split at {split}"
+                );
+            }
+        }
+        assert!(compared > 800, "compared too few splits: {compared}");
+        assert!(skipped_dcs > 0, "DCS exclusion did not trigger");
+        assert!(
+            skipped_whole_loss > 0,
+            "known whole-feed loss exclusion did not trigger"
+        );
     }
 }
