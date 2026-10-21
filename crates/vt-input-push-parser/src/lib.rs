@@ -539,7 +539,7 @@ impl VTPushParserInput {
                 });
                 bytes = &bytes[read..];
                 if read == 0 {
-                    // The parser is holding a partial escape, but no input left.
+                    // Parser holds a partial escape, but no input left.
                     return;
                 }
                 continue;
@@ -1027,10 +1027,7 @@ mod tests {
         assert_eq!(events[1], InputEvent::KeyChar('a', Modifier::empty()));
     }
 
-    // Streaming behaviour: a chunk may end anywhere, including in the middle of
-    // an escape sequence. What these pin is that `feed_with` returns at all --
-    // the bug was an infinite loop -- so each test carries a `#[timeout]` from
-    // ntest: a regression fails the test instead of hanging the whole suite.
+    // Tests use ntest timeouts, since chunks may end mid-escape.
 
     const ESCAPE_CORPUS: &str = include_str!("../../vt-push-parser/tests/escapes.txt");
 
@@ -1053,9 +1050,7 @@ mod tests {
     #[test]
     #[timeout(10_000)]
     fn feed_with_returns_when_a_chunk_ends_mid_escape() {
-        // Every truncated escape from the corpus leaves the core parser
-        // non-ground. Sweep every split point of every escape: before the fix
-        // each of these spun forever on the empty remainder.
+        // Split every escape at every point. All hung before.
         let mut cases = 0;
         for line in ESCAPE_CORPUS.lines() {
             let line = line.trim();
@@ -1091,9 +1086,7 @@ mod tests {
         let whole = feed_chunks(vec![bytes.to_vec()]);
         assert_eq!(whole, ["Osc(\"0;title\")"]);
 
-        // Split anywhere after the introducer. A split leaving a lone trailing
-        // ESC is excluded: that ESC is held for key disambiguation instead, a
-        // separate pre-existing limitation of chunking.
+        // Split after the introducer. A trailing lone ESC is excluded.
         for split in 2..bytes.len() {
             let split_events = feed_chunks(vec![bytes[..split].to_vec(), bytes[split..].to_vec()]);
             assert_eq!(
@@ -1127,10 +1120,7 @@ mod tests {
     #[test]
     #[timeout(10_000)]
     fn csi_split_across_feeds_terminates() {
-        // The CSI *payload* does not survive every split: a chunk ending on the
-        // ambiguous key prefix `ESC [` is dropped rather than held in the key
-        // buffer, which predates this fix and is a data-loss bug, not a hang.
-        // All that is pinned here is that the call comes back.
+        // Payload is dropped on some splits. Only termination is pinned.
         let bytes = b"\x1b[1;2m";
         for split in 1..bytes.len() {
             feed_chunks(vec![bytes[..split].to_vec(), bytes[split..].to_vec()]);
