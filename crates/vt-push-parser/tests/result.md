@@ -153,6 +153,35 @@ OscStart, data=11;rgb:000/fff/000
 OscStart, data=12;test [data
 ```
 ---
+## OSC: Empty payload terminated by BEL
+```
+<ESC>]<BEL>
+```
+
+```
+OscStart, data=
+```
+---
+## OSC: Empty payload after text, terminated by BEL
+```
+abc<ESC>]<BEL>
+```
+
+```
+abc
+OscStart, data=
+```
+---
+## OSC: Empty payload after a previous OSC, terminated by BEL
+```
+<ESC>]0;A<BEL><ESC>]<BEL>
+```
+
+```
+OscStart, data=0;A
+OscStart, data=
+```
+---
 ## DCS: Device control string with parameters (1,2,3) and payload terminated by ST
 ```
 <ESC>P 1;2;3|test data<ESC>\
