@@ -800,26 +800,12 @@ impl<'a> NumericParamBuf<'a> {
 /// ## Streamed payloads
 ///
 /// `Raw`, `DcsData`/`DcsEnd` and `OscData`/`OscEnd` borrow from the input of the
-/// `feed_with` call that produced them, and the parser never copies payload
-/// bytes. An event can therefore only ever cover bytes from a single call: a
-/// payload that spans several calls arrives as several events.
+/// `feed_with` call that returned them.
 ///
 /// For OSC and DCS strings, everything the parser has buffered when the string
-/// terminates is emitted in the `OscEnd`/`DcsEnd` event; bytes flushed earlier
-/// because a `feed_with` call ended (or because a DEL interrupted the run)
-/// arrived as `OscData`/`DcsData` before it. In other words:
-///
-/// - the **payload** of a string is the concatenation of its `OscData` bytes
-///   (or `DcsData` bytes) and the final `OscEnd.data` (or `DcsEnd`) bytes, in
-///   event order;
-/// - `OscEnd.data` / `DcsEnd` may be **empty**, including for a string with a
-///   payload, whenever the last buffered byte was already flushed;
-/// - feeding the same input in one call or in several may distribute the same
-///   payload differently between the `*Data` and the `*End` events. The bytes
-///   and their order do not change.
-///
-/// Callers that want the whole payload should accumulate it; the split is not
-/// part of the input, only of the feeding.
+/// terminates is emitted in the `OscEnd`/`DcsEnd` event and bytes flushed earlier
+/// because a `feed_with` call ended (or because a `DEL` interrupted the run)
+/// arrived as `OscData`/`DcsData` before it.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub enum VTEvent<'a> {
@@ -846,24 +832,18 @@ pub enum VTEvent<'a> {
 
     // DCS stream
     DcsStart(DCS<'a>),
-    /// A run of DCS payload bytes, flushed before the end of the string. See
-    /// the type-level docs: the payload is `DcsData` bytes followed by
-    /// [`VTEvent::DcsEnd`] bytes.
+    /// A run of DCS payload bytes, before the end of the string.
     DcsData(&'a [u8]),
-    /// The end of a DCS string. Carries any payload bytes still buffered, which
-    /// may be empty.
+    /// The end of a DCS string, and any remaining DCS payload, if any.
     DcsEnd(&'a [u8]),
     DcsCancel,
 
     // OSC stream
     OscStart,
-    /// A run of OSC payload bytes, flushed before the end of the string. See
-    /// the type-level docs: the payload is `OscData` bytes followed by
-    /// [`VTEvent::OscEnd`] data.
+    /// A run of OSC payload bytes, before the end of the string.
     OscData(&'a [u8]),
     OscEnd {
-        /// Any payload bytes still buffered at the end of the string. May be
-        /// empty, even for a non-empty payload; see the type-level docs.
+        /// Any payload bytes still buffered at the end of the string.
         data: &'a [u8],
         /// Whether the BEL was used to end the OSC stream.
         used_bel: bool,
