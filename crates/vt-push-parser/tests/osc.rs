@@ -65,11 +65,7 @@ fn empty_osc_after_previous_osc() {
     // Same with three OSCs in a row.
     assert_eq!(
         osc_ends(b"\x1b]0;A\x07\x1b]1;B\x07\x1b]\x07"),
-        vec![
-            (b"0;A".to_vec(), true),
-            (b"1;B".to_vec(), true),
-            EMPTY_BEL,
-        ]
+        vec![(b"0;A".to_vec(), true), (b"1;B".to_vec(), true), EMPTY_BEL]
     );
 }
 
