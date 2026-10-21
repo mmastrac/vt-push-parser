@@ -1862,8 +1862,7 @@ mod tests {
             "{ev:#?}"
         );
 
-        // And for intermediates carried in EscInt before the ESC: the '#'
-        // intermediate must not come back as a CSI intermediate.
+        // The '#' intermediate must not come back as a CSI intermediate.
         let ev = collect_debug(b"\x1b#\x1b[31m");
         assert_eq!(ev, ["Csi('31', '', 'm')"], "{ev:#?}");
     }
