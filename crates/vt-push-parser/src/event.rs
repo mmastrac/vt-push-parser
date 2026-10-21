@@ -332,7 +332,7 @@ impl ParamList {
         Some(&self.data[offset..offset + len])
     }
 
-    /// The number of parameter bytes (excluding `;` separators).
+    /// The number of parameter bytes (including `;` separators).
     #[inline]
     pub fn byte_len(&self) -> usize {
         self.used as usize + self.count.saturating_sub(1) as usize
@@ -1351,7 +1351,7 @@ impl ParamBufOwned {
         self.overflowed
     }
 
-    /// The number of parameter bytes (excluding `;` separators).
+    /// The number of parameter bytes (including `;` separators).
     pub fn byte_len(&self) -> usize {
         ParamSource::Owned(self).byte_len()
     }
