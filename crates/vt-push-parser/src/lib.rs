@@ -1850,9 +1850,7 @@ mod tests {
 
     #[test]
     fn esc_after_aborted_csi_drops_stale_header() {
-        // 0x80 is invalid inside a CSI header and aborts into CsiIgnore. The
-        // ESC that starts the next sequence must clear the aborted header, so
-        // the stale `cur_param` "1" does not prefix the next parameter.
+        // 0x80 is invalid inside a CSI header and aborts into CsiIgnore.
         let ev = collect_debug(b"\x1b[1\x80\x1b[5m");
         assert_eq!(ev, ["Csi('5', '', 'm')"], "{ev:#?}");
 
