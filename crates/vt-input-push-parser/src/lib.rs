@@ -505,7 +505,7 @@ impl VTPushParserInput {
         loop {
             if bytes.is_empty() {
                 // Nothing left to feed. The parser may hold a partial escape
-                // for the next call; the key prefix is already in `combined`.
+                // for the next call; any carried prefix was prepended already.
                 return;
             }
 
