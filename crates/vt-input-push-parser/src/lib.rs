@@ -490,16 +490,25 @@ impl VTPushParserInput {
 
         // A chunk that ended on an ambiguous key prefix (a lone `ESC`, `ESC [`, ...)
         // left it in `key_buffer`. Prepend it so the prefix and its continuation
-        // are matched and parsed as one stream, exactly as if fed whole. Reuse
-        // `combined` so a byte-at-a-time caller does not allocate per call.
+        // are matched and parsed as one stream, exactly as if fed whole. A small
+        // stack buffer covers the byte-at-a-time case; `combined` covers larger
+        // chunks without allocating per call.
+        let mut scratch = [0u8; keys::MAX_SEQUENCE_LEN + 1];
         let mut bytes = bytes;
         if self.key_buffer_len > 0 {
-            self.combined.clear();
-            self.combined
-                .extend_from_slice(&self.key_buffer[..self.key_buffer_len]);
-            self.combined.extend_from_slice(bytes);
+            let prefix_len = self.key_buffer_len;
+            if prefix_len + bytes.len() <= scratch.len() {
+                scratch[..prefix_len].copy_from_slice(&self.key_buffer[..prefix_len]);
+                scratch[prefix_len..prefix_len + bytes.len()].copy_from_slice(bytes);
+                bytes = &scratch[..prefix_len + bytes.len()];
+            } else {
+                self.combined.clear();
+                self.combined
+                    .extend_from_slice(&self.key_buffer[..prefix_len]);
+                self.combined.extend_from_slice(bytes);
+                bytes = &self.combined;
+            }
             self.key_buffer_len = 0;
-            bytes = &self.combined;
         }
 
         loop {
@@ -561,7 +570,7 @@ impl VTPushParserInput {
                     false
                 });
                 bytes = &bytes[read..];
-                if read == 0 {
+                if read == 0 || bytes.is_empty() {
                     // Parser holds a partial escape, but no input left.
                     return;
                 }
@@ -589,6 +598,9 @@ impl VTPushParserInput {
                         },
                     );
                     bytes = &bytes[read..];
+                    if read == 0 || bytes.is_empty() {
+                        return;
+                    }
                 }
                 keys::MatchResult::PendingMatch => {
                     // The chunk ends on a prefix that may still complete into a
