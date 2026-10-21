@@ -532,6 +532,14 @@ impl VTPushParserInput {
                     false
                 });
                 bytes = &bytes[read..];
+                if read == 0 {
+                    // The parser is holding a partial escape (correct: the chunk
+                    // ended mid-sequence) and there is no input left to give it,
+                    // so it consumed nothing. Looping again would re-enter this
+                    // branch with the same empty slice for ever; the next feed
+                    // call resumes the sequence.
+                    return;
+                }
                 continue;
             }
 
