@@ -630,6 +630,8 @@ impl VTPushParserInput {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[test]
@@ -1032,5 +1034,141 @@ mod tests {
             })
         );
         assert_eq!(events[1], InputEvent::KeyChar('a', Modifier::empty()));
+    }
+
+    // Streaming behaviour: a chunk may end anywhere, including in the middle of
+    // an escape sequence. What these pin is that `feed_with` returns at all --
+    // the bug was an infinite loop -- so every feed runs behind a watchdog: a
+    // plain call would hang the suite instead of failing it.
+
+    const ESCAPE_CORPUS: &str = include_str!("../../vt-push-parser/tests/escapes.txt");
+
+    /// Runs `f` on a worker thread, and fails the test if it doesn't return.
+    fn watchdog<T: Send + 'static>(what: &str, f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name(what.chars().take(64).collect())
+            .spawn(move || {
+                let _ = tx.send(f());
+            })
+            .unwrap();
+        match rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(value) => value,
+            Err(_) => panic!("feed_with did not return for {what:?}: infinite loop?"),
+        }
+    }
+
+    fn describe_event(event: InputEvent<'_>) -> String {
+        match event {
+            InputEvent::Osc(data) => format!("Osc({:?})", String::from_utf8_lossy(data)),
+            event => format!("{event:?}"),
+        }
+    }
+
+    fn feed_chunks(what: &str, chunks: Vec<Vec<u8>>) -> Vec<String> {
+        watchdog(what, move || {
+            let mut parser = VTPushParserInput::new();
+            let mut events = Vec::new();
+            for chunk in &chunks {
+                parser.feed_with(chunk, |event| events.push(describe_event(event)));
+            }
+            events
+        })
+    }
+
+    #[test]
+    fn feed_with_returns_when_a_chunk_ends_mid_escape() {
+        // Every truncated escape from the corpus leaves the core parser
+        // non-ground. Sweep every split point of every escape: before the fix
+        // each of these spun forever on the empty remainder.
+        let mut cases = 0;
+        for line in ESCAPE_CORPUS.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let decoded = vt_push_parser::ascii::decode_string(line);
+            for split in 1..decoded.len() {
+                cases += 1;
+                feed_chunks(
+                    line,
+                    vec![decoded[..split].to_vec(), decoded[split..].to_vec()],
+                );
+            }
+        }
+        assert!(cases > 1000, "escape corpus unexpectedly small: {cases}");
+    }
+
+    #[test]
+    fn empty_chunks_after_a_partial_escape_do_not_spin() {
+        let events = watchdog("empty chunks after a partial OSC", || {
+            let mut parser = VTPushParserInput::new();
+            let mut events = Vec::new();
+            parser.feed_with(b"\x1b]0;", |event| events.push(describe_event(event)));
+            for _ in 0..4 {
+                parser.feed_with(b"", |event| events.push(describe_event(event)));
+            }
+            parser.feed_with(b"title\x07", |event| events.push(describe_event(event)));
+            events
+        });
+        assert_eq!(events, ["Osc(\"0;title\")"]);
+    }
+
+    #[test]
+    fn osc_payload_split_across_feeds_is_not_truncated() {
+        let bytes = b"\x1b]0;title\x07";
+        let whole = feed_chunks("osc whole", vec![bytes.to_vec()]);
+        assert_eq!(whole, ["Osc(\"0;title\")"]);
+
+        // Split anywhere after the introducer. A split leaving a lone trailing
+        // ESC is excluded: that ESC is held for key disambiguation instead, a
+        // separate pre-existing limitation of chunking.
+        for split in 2..bytes.len() {
+            let split_events = feed_chunks(
+                "osc split",
+                vec![bytes[..split].to_vec(), bytes[split..].to_vec()],
+            );
+            assert_eq!(
+                split_events, whole,
+                "OSC payload truncated, split at {split}"
+            );
+        }
+
+        let three_ways = feed_chunks(
+            "osc split three ways",
+            vec![b"\x1b]0;".to_vec(), b"tit".to_vec(), b"le\x07".to_vec()],
+        );
+        assert_eq!(three_ways, whole);
+    }
+
+    #[test]
+    fn osc_terminated_by_st_and_split_before_it() {
+        let bytes = b"\x1b]11;rgb:000/fff/000\x1b\\";
+        let whole = feed_chunks("osc st whole", vec![bytes.to_vec()]);
+        assert_eq!(whole, ["Osc(\"11;rgb:000/fff/000\")"]);
+
+        let split = feed_chunks(
+            "osc st split",
+            vec![
+                bytes[..bytes.len() - 1].to_vec(),
+                bytes[bytes.len() - 1..].to_vec(),
+            ],
+        );
+        assert_eq!(split, whole);
+    }
+
+    #[test]
+    fn csi_split_across_feeds_terminates() {
+        // The CSI *payload* does not survive every split: a chunk ending on the
+        // ambiguous key prefix `ESC [` is dropped rather than held in the key
+        // buffer, which predates this fix and is a data-loss bug, not a hang.
+        // All that is pinned here is that the call comes back.
+        let bytes = b"\x1b[1;2m";
+        for split in 1..bytes.len() {
+            feed_chunks(
+                "csi split",
+                vec![bytes[..split].to_vec(), bytes[split..].to_vec()],
+            );
+        }
     }
 }
