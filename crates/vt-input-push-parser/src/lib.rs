@@ -1041,7 +1041,7 @@ mod tests {
         }
     }
 
-    fn feed_chunks(what: &str, chunks: Vec<Vec<u8>>) -> Vec<String> {
+    fn feed_chunks(chunks: Vec<Vec<u8>>) -> Vec<String> {
         let mut parser = VTPushParserInput::new();
         let mut events = Vec::new();
         for chunk in &chunks {
@@ -1065,10 +1065,7 @@ mod tests {
             let decoded = vt_push_parser::ascii::decode_string(line);
             for split in 1..decoded.len() {
                 cases += 1;
-                feed_chunks(
-                    line,
-                    vec![decoded[..split].to_vec(), decoded[split..].to_vec()],
-                );
+                feed_chunks(vec![decoded[..split].to_vec(), decoded[split..].to_vec()]);
             }
         }
         assert!(cases > 1000, "escape corpus unexpectedly small: {cases}");
@@ -1091,27 +1088,25 @@ mod tests {
     #[timeout(10_000)]
     fn osc_payload_split_across_feeds_is_not_truncated() {
         let bytes = b"\x1b]0;title\x07";
-        let whole = feed_chunks("osc whole", vec![bytes.to_vec()]);
+        let whole = feed_chunks(vec![bytes.to_vec()]);
         assert_eq!(whole, ["Osc(\"0;title\")"]);
 
         // Split anywhere after the introducer. A split leaving a lone trailing
         // ESC is excluded: that ESC is held for key disambiguation instead, a
         // separate pre-existing limitation of chunking.
         for split in 2..bytes.len() {
-            let split_events = feed_chunks(
-                "osc split",
-                vec![bytes[..split].to_vec(), bytes[split..].to_vec()],
-            );
+            let split_events = feed_chunks(vec![bytes[..split].to_vec(), bytes[split..].to_vec()]);
             assert_eq!(
                 split_events, whole,
                 "OSC payload truncated, split at {split}"
             );
         }
 
-        let three_ways = feed_chunks(
-            "osc split three ways",
-            vec![b"\x1b]0;".to_vec(), b"tit".to_vec(), b"le\x07".to_vec()],
-        );
+        let three_ways = feed_chunks(vec![
+            b"\x1b]0;".to_vec(),
+            b"tit".to_vec(),
+            b"le\x07".to_vec(),
+        ]);
         assert_eq!(three_ways, whole);
     }
 
@@ -1119,16 +1114,13 @@ mod tests {
     #[timeout(10_000)]
     fn osc_terminated_by_st_and_split_before_it() {
         let bytes = b"\x1b]11;rgb:000/fff/000\x1b\\";
-        let whole = feed_chunks("osc st whole", vec![bytes.to_vec()]);
+        let whole = feed_chunks(vec![bytes.to_vec()]);
         assert_eq!(whole, ["Osc(\"11;rgb:000/fff/000\")"]);
 
-        let split = feed_chunks(
-            "osc st split",
-            vec![
-                bytes[..bytes.len() - 1].to_vec(),
-                bytes[bytes.len() - 1..].to_vec(),
-            ],
-        );
+        let split = feed_chunks(vec![
+            bytes[..bytes.len() - 1].to_vec(),
+            bytes[bytes.len() - 1..].to_vec(),
+        ]);
         assert_eq!(split, whole);
     }
 
@@ -1141,10 +1133,7 @@ mod tests {
         // All that is pinned here is that the call comes back.
         let bytes = b"\x1b[1;2m";
         for split in 1..bytes.len() {
-            feed_chunks(
-                "csi split",
-                vec![bytes[..split].to_vec(), bytes[split..].to_vec()],
-            );
+            feed_chunks(vec![bytes[..split].to_vec(), bytes[split..].to_vec()]);
         }
     }
 }
