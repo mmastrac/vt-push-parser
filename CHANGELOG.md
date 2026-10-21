@@ -8,18 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+
 - **OSC/DCS**: an empty string payload no longer reports a stale slice in
-  `OscEnd.data` / `DcsEnd`. The slice start was only set when the first payload
-  byte was buffered, so an empty payload (e.g. `ESC ] BEL`) repeated whatever
-  came before it — the introducer, preceding text, or the previous OSC's
-  payload — duplicating those bytes in the event stream and breaking
-  `encode()` round-tripping.
+  `OscEnd.data` / `DcsEnd`.
 
 ### Changed
-- Documented the payload contract for chunked input: OSC/DCS payload may arrive
-  split across `OscData`/`DcsData` events, and `OscEnd.data`/`DcsEnd` may be
-  empty. Concatenate the string's `*Data` bytes with its `*End` bytes to get the
-  whole payload.
+
+- Documented the payload contract for chunked input.
 
 ## [0.15.0] - 2025-10-20
 
