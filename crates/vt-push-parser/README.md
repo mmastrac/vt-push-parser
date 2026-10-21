@@ -18,32 +18,8 @@ and the split depends on how the input was chunked:
 
 - `Raw` runs are coalesced only within one call.
 - For OSC and DCS strings, bytes flushed before the string ends arrive as
-  `OscData`/`DcsData`; `OscEnd.data`/`DcsEnd` carry whatever is still buffered
+  `OscData`/`DcsData`. `OscEnd.data`/`DcsEnd` hold the buffered remainder
   when the terminator arrives, and may be empty.
-
-To get a whole payload, concatenate that string's `OscData` bytes followed by
-its `OscEnd.data` bytes (likewise for DCS). Re-encoding every event in order
-reproduces the input byte for byte, however it was chunked, as long as the
-input contains no truncated escape sequence.
-
-```rust
-use vt_push_parser::event::VTEvent;
-use vt_push_parser::VTPushParser;
-
-let mut payload = Vec::new();
-let mut parser = VTPushParser::new();
-// Fed whole, this puts the payload in `OscEnd`; fed in pieces it does not.
-for chunk in [&b"\x1b]0;ti"[..], &b"tle\x07"[..]] {
-    parser.feed_with(chunk, |event: VTEvent| {
-        match event {
-            VTEvent::OscData(data) => payload.extend_from_slice(data),
-            VTEvent::OscEnd { data, .. } => payload.extend_from_slice(data),
-            _ => {}
-        }
-    });
-}
-assert_eq!(payload, b"0;title");
-```
 
 ## Example
 
