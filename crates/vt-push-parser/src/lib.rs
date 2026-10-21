@@ -896,6 +896,11 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                     }))
                 }
                 CSI => {
+                    // A new CSI header starts here. Drop anything left over from
+                    // a sequence that was aborted into CsiIgnore (a stale
+                    // `cur_param` would otherwise prefix the first parameter of
+                    // this sequence).
+                    self.clear_hdr_collectors();
                     if INTEREST & VT_PARSER_INTEREST_CSI == 0 {
                         self.st = CsiIgnore;
                     } else {
@@ -904,6 +909,9 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                     VTAction::None
                 }
                 DCS => {
+                    // As with CSI above: a new DCS header starts here, so no
+                    // collector may carry state over from an aborted sequence.
+                    self.clear_hdr_collectors();
                     if INTEREST & VT_PARSER_INTEREST_DCS == 0 {
                         self.st = DcsIgnore;
                     } else {
@@ -1841,6 +1849,29 @@ mod tests {
         parser.finish(|_ev: VTEvent| count += 1);
         // Exactly 2 events: held ESC as OscData + OscCancel
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn esc_after_aborted_csi_drops_stale_header() {
+        // 0x80 is invalid inside a CSI header and aborts into CsiIgnore. The
+        // ESC that starts the next sequence must clear the aborted header, so
+        // the stale `cur_param` "1" does not prefix the next parameter.
+        let ev = collect_debug(b"\x1b[1\x80\x1b[5m");
+        assert_eq!(ev, ["Csi('5', '', 'm')"], "{ev:#?}");
+
+        // Same for a DCS header, which reuses the same collectors (with the
+        // leak the first parameter would come out as '11').
+        let ev = collect_debug(b"\x1b[1\x80\x1bP1;2;3|data\x1b\\");
+        assert_eq!(
+            ev,
+            ["DcsStart('1', '2', '3', '', |)", "DcsEnd('data')"],
+            "{ev:#?}"
+        );
+
+        // And for intermediates carried in EscInt before the ESC: the '#'
+        // intermediate must not come back as a CSI intermediate.
+        let ev = collect_debug(b"\x1b#\x1b[31m");
+        assert_eq!(ev, ["Csi('31', '', 'm')"], "{ev:#?}");
     }
 
     #[test]

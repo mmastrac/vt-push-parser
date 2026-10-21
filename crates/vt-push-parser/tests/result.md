@@ -347,6 +347,15 @@ Csi(':1', '2', '3', '', 'g')
 y
 ```
 ---
+## CSI: invalid parameter byte aborts to CSI_IGNORE, and the following ESC starts a fresh header
+```
+<ESC>[1<80><ESC>[5m
+```
+
+```
+Csi('5', '', 'm')
+```
+---
 ## ESC ESC: Double escape followed by CSI cursor down
 ```
 <ESC><ESC>[1;2;3d
