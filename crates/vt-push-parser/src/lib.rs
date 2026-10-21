@@ -542,18 +542,26 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                     }
                 }
                 VTAction::End(VTEnd::Dcs) => {
-                    state.current_emit = None;
                     let hold = std::mem::take(&mut state.hold);
-                    let range = state.buffer_idx..(i.saturating_sub(hold as usize));
+                    // No buffered bytes means the string had no payload: emit an
+                    // empty slice.
+                    let range = match state.current_emit.take() {
+                        Some(_) => state.buffer_idx..(i.saturating_sub(hold as usize)),
+                        None => 0..0,
+                    };
                     if cb.event(VTEvent::DcsEnd(&input[range])).abort() {
                         return i + 1;
                     }
                     held_byte = None;
                 }
                 VTAction::End(VTEnd::Osc { used_bel }) => {
-                    state.current_emit = None;
                     let hold = std::mem::take(&mut state.hold);
-                    let range = state.buffer_idx..(i.saturating_sub(hold as usize));
+                    // `buffer_idx` is set lazily, when the first payload byte is
+                    // buffered.
+                    let range = match state.current_emit.take() {
+                        Some(_) => state.buffer_idx..(i.saturating_sub(hold as usize)),
+                        None => 0..0,
+                    };
                     if cb
                         .event(VTEvent::OscEnd {
                             data: &input[range],

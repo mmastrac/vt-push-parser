@@ -33,6 +33,12 @@ Hello<DEL>World
 <ESC>]11;rgb:000/fff/000<ESC>\
 # OSC: Set text color (12;test [data) terminated by ST
 <ESC>]12;test [data<ESC>\
+# OSC: Empty payload terminated by BEL
+<ESC>]<BEL>
+# OSC: Empty payload after text, terminated by BEL
+abc<ESC>]<BEL>
+# OSC: Empty payload after a previous OSC, terminated by BEL
+<ESC>]0;A<BEL><ESC>]<BEL>
 # DCS: Device control string with parameters (1,2,3) and payload terminated by ST
 <ESC>P 1;2;3|test data<ESC>\
 # DCS: Device control string with private parameter > and payload terminated by ST

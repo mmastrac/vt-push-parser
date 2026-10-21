@@ -796,6 +796,16 @@ impl<'a> NumericParamBuf<'a> {
 
 /// A union of all possible events that can be emitted by the parser, with
 /// borrowed data.
+///
+/// ## Streamed payloads
+///
+/// `Raw`, `DcsData`/`DcsEnd` and `OscData`/`OscEnd` borrow from the input of the
+/// `feed_with` call that returned them.
+///
+/// For OSC and DCS strings, everything the parser has buffered when the string
+/// terminates is emitted in the `OscEnd`/`DcsEnd` event and bytes flushed earlier
+/// because a `feed_with` call ended (or because a `DEL` interrupted the run)
+/// arrived as `OscData`/`DcsData` before it.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub enum VTEvent<'a> {
@@ -822,14 +832,18 @@ pub enum VTEvent<'a> {
 
     // DCS stream
     DcsStart(DCS<'a>),
+    /// A run of DCS payload bytes, before the end of the string.
     DcsData(&'a [u8]),
+    /// The end of a DCS string, and any remaining DCS payload, if any.
     DcsEnd(&'a [u8]),
     DcsCancel,
 
     // OSC stream
     OscStart,
+    /// A run of OSC payload bytes, before the end of the string.
     OscData(&'a [u8]),
     OscEnd {
+        /// Any payload bytes still buffered at the end of the string.
         data: &'a [u8],
         /// Whether the BEL was used to end the OSC stream.
         used_bel: bool,

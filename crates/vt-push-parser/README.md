@@ -10,6 +10,17 @@ they are parsed. You can easily use this as part of a push or pull pipeline.
 This crate will eventually be zero-alloc, but currently it is not zero-alloc
 in all cases.
 
+## Streamed payloads
+
+Events borrow from the buffer passed to `feed_with`, so an event never spans two
+calls. Text and string payloads may therefore be split across several events,
+and the split depends on how the input was chunked:
+
+- `Raw` runs are coalesced only within one call.
+- For OSC and DCS strings, bytes flushed before the string ends arrive as
+  `OscData`/`DcsData`. `OscEnd.data`/`DcsEnd` hold the buffered remainder
+  when the terminator arrives, and may be empty.
+
 ## Example
 
 ```rust
