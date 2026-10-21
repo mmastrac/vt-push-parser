@@ -457,7 +457,7 @@ impl VTPushParserInput {
         // Handle the result of handle_vt_event, setting up capture or emitting
         // unhandled events as raw CSI.
         macro_rules! dispatch_vt {
-            ($action:expr, $cb:expr, $capture:expr, $capture_state:expr) => {
+            ($action:expr, $cb:expr, $capture:expr, $capture_state:expr, $osc:expr) => {
                 match $action {
                     HandleAction::Handled => {}
                     HandleAction::Capture(state, internal) => {
@@ -465,16 +465,26 @@ impl VTPushParserInput {
                         *$capture_state = state;
                     }
                     HandleAction::Unhandled(event) => {
-                        let input_event = match event {
-                            VTEvent::Csi(csi) => Some(InputEvent::Csi(csi)),
-                            VTEvent::OscEnd { data, .. } => Some(InputEvent::Osc(data)),
-                            VTEvent::DcsEnd(data) => Some(InputEvent::Dcs(data)),
-                            VTEvent::Ss2(ss2) => Some(InputEvent::Ss2(ss2)),
-                            VTEvent::Ss3(ss3) => Some(InputEvent::Ss3(ss3)),
-                            _ => None,
-                        };
-                        if let Some(e) = input_event {
-                            $cb(e);
+                        // An OSC payload can span feeds: the core parser hands out
+                        // whatever it has as OscData when a chunk ends inside the
+                        // string, and completes with the remainder in OscEnd. The
+                        // payload is therefore accumulated here rather than passed
+                        // through as a single slice, which made a split reply arrive
+                        // truncated.
+                        match event {
+                            VTEvent::OscStart => $osc.clear(),
+                            VTEvent::OscData(data) => $osc.extend_from_slice(data),
+                            VTEvent::OscEnd { data, .. } => {
+                                $osc.extend_from_slice(data);
+                                $cb(InputEvent::Osc($osc.as_slice()));
+                                $osc.clear();
+                            }
+                            VTEvent::OscCancel => $osc.clear(),
+                            VTEvent::Csi(csi) => $cb(InputEvent::Csi(csi)),
+                            VTEvent::DcsEnd(data) => $cb(InputEvent::Dcs(data)),
+                            VTEvent::Ss2(ss2) => $cb(InputEvent::Ss2(ss2)),
+                            VTEvent::Ss3(ss3) => $cb(InputEvent::Ss3(ss3)),
+                            _ => {}
                         }
                     }
                 }
@@ -526,9 +536,10 @@ impl VTPushParserInput {
             if !self.parser.is_ground() {
                 let capture = &mut self.capture;
                 let capture_state = &mut self.capture_state;
+                let data_accumulator = &mut self.data_accumulator;
                 let read = self.parser.feed_with_abortable(bytes, |event: VTEvent| {
                     let action = handle_vt_event(event, &mut cb);
-                    dispatch_vt!(action, cb, capture, capture_state);
+                    dispatch_vt!(action, cb, capture, capture_state, data_accumulator);
                     false
                 });
                 bytes = &bytes[read..];
@@ -563,12 +574,13 @@ impl VTPushParserInput {
                         self.key_buffer.rotate_left(length as _);
                         let capture = &mut self.capture;
                         let capture_state = &mut self.capture_state;
+                        let data_accumulator = &mut self.data_accumulator;
                         // Feed them unconditionally to the parser
                         self.parser.feed_with_abortable(
                             &self.key_buffer[keys::MAX_SEQUENCE_LEN - length as usize..],
                             |event: VTEvent<'_>| {
                                 let action = handle_vt_event(event, &mut cb);
-                                dispatch_vt!(action, cb, capture, capture_state);
+                                dispatch_vt!(action, cb, capture, capture_state, data_accumulator);
                                 false
                             },
                         );
@@ -594,11 +606,12 @@ impl VTPushParserInput {
                         // won't match.
                         let capture = &mut self.capture;
                         let capture_state = &mut self.capture_state;
+                        let data_accumulator = &mut self.data_accumulator;
                         self.parser.feed_with_abortable(
                             &bytes[..length as usize],
                             |event: VTEvent<'_>| {
                                 let action = handle_vt_event(event, &mut cb);
-                                dispatch_vt!(action, cb, capture, capture_state);
+                                dispatch_vt!(action, cb, capture, capture_state, data_accumulator);
                                 false
                             },
                         );
