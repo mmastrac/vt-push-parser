@@ -125,6 +125,24 @@ fn ignored_c0_bytes_are_not_pulled_into_the_payload() {
     assert_eq!(osc_ends(b"\x1b]\n\x07"), vec![EMPTY_BEL]);
 }
 
+#[test]
+fn flushed_payload_is_not_repeated_at_the_end() {
+    // A DEL inside the string flushes the buffered payload early. The flush is
+    // the whole payload, so nothing is left for the end: `OscEnd.data` must be
+    // empty instead of repeating what `OscData` already carried.
+    assert_eq!(
+        events(b"\x1b]A\x7f\x07"),
+        vec![
+            VTOwnedEvent::OscStart,
+            VTOwnedEvent::OscData(b"A".to_vec()),
+            VTOwnedEvent::OscEnd {
+                data: Vec::new(),
+                used_bel: true,
+            },
+        ]
+    );
+}
+
 /// Encode the events of `chunks` back into a byte stream.
 fn re_encode(chunks: &[&[u8]]) -> Vec<u8> {
     let mut parser = VTPushParser::new();
