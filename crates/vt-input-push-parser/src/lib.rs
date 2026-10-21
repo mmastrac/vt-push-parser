@@ -621,7 +621,7 @@ impl VTPushParserInput {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use ntest::timeout;
 
     use super::*;
 
@@ -1029,25 +1029,10 @@ mod tests {
 
     // Streaming behaviour: a chunk may end anywhere, including in the middle of
     // an escape sequence. What these pin is that `feed_with` returns at all --
-    // the bug was an infinite loop -- so every feed runs behind a watchdog: a
-    // plain call would hang the suite instead of failing it.
+    // the bug was an infinite loop -- so each test carries a `#[timeout]` from
+    // ntest: a regression fails the test instead of hanging the whole suite.
 
     const ESCAPE_CORPUS: &str = include_str!("../../vt-push-parser/tests/escapes.txt");
-
-    /// Runs `f` on a worker thread, and fails the test if it doesn't return.
-    fn watchdog<T: Send + 'static>(what: &str, f: impl FnOnce() -> T + Send + 'static) -> T {
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::Builder::new()
-            .name(what.chars().take(64).collect())
-            .spawn(move || {
-                let _ = tx.send(f());
-            })
-            .unwrap();
-        match rx.recv_timeout(Duration::from_secs(10)) {
-            Ok(value) => value,
-            Err(_) => panic!("feed_with did not return for {what:?}: infinite loop?"),
-        }
-    }
 
     fn describe_event(event: InputEvent<'_>) -> String {
         match event {
@@ -1057,17 +1042,16 @@ mod tests {
     }
 
     fn feed_chunks(what: &str, chunks: Vec<Vec<u8>>) -> Vec<String> {
-        watchdog(what, move || {
-            let mut parser = VTPushParserInput::new();
-            let mut events = Vec::new();
-            for chunk in &chunks {
-                parser.feed_with(chunk, |event| events.push(describe_event(event)));
-            }
-            events
-        })
+        let mut parser = VTPushParserInput::new();
+        let mut events = Vec::new();
+        for chunk in &chunks {
+            parser.feed_with(chunk, |event| events.push(describe_event(event)));
+        }
+        events
     }
 
     #[test]
+    #[timeout(10_000)]
     fn feed_with_returns_when_a_chunk_ends_mid_escape() {
         // Every truncated escape from the corpus leaves the core parser
         // non-ground. Sweep every split point of every escape: before the fix
@@ -1091,21 +1075,20 @@ mod tests {
     }
 
     #[test]
+    #[timeout(10_000)]
     fn empty_chunks_after_a_partial_escape_do_not_spin() {
-        let events = watchdog("empty chunks after a partial OSC", || {
-            let mut parser = VTPushParserInput::new();
-            let mut events = Vec::new();
-            parser.feed_with(b"\x1b]0;", |event| events.push(describe_event(event)));
-            for _ in 0..4 {
-                parser.feed_with(b"", |event| events.push(describe_event(event)));
-            }
-            parser.feed_with(b"title\x07", |event| events.push(describe_event(event)));
-            events
-        });
+        let mut parser = VTPushParserInput::new();
+        let mut events = Vec::new();
+        parser.feed_with(b"\x1b]0;", |event| events.push(describe_event(event)));
+        for _ in 0..4 {
+            parser.feed_with(b"", |event| events.push(describe_event(event)));
+        }
+        parser.feed_with(b"title\x07", |event| events.push(describe_event(event)));
         assert_eq!(events, ["Osc(\"0;title\")"]);
     }
 
     #[test]
+    #[timeout(10_000)]
     fn osc_payload_split_across_feeds_is_not_truncated() {
         let bytes = b"\x1b]0;title\x07";
         let whole = feed_chunks("osc whole", vec![bytes.to_vec()]);
@@ -1133,6 +1116,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(10_000)]
     fn osc_terminated_by_st_and_split_before_it() {
         let bytes = b"\x1b]11;rgb:000/fff/000\x1b\\";
         let whole = feed_chunks("osc st whole", vec![bytes.to_vec()]);
@@ -1149,6 +1133,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(10_000)]
     fn csi_split_across_feeds_terminates() {
         // The CSI *payload* does not survive every split: a chunk ending on the
         // ambiguous key prefix `ESC [` is dropped rather than held in the key
