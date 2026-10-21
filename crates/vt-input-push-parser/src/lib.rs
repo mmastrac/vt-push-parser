@@ -329,6 +329,7 @@ pub struct VTPushParserInput {
     key_buffer: [u8; keys::MAX_SEQUENCE_LEN],
     key_buffer_len: usize,
     data_accumulator: Vec<u8>,
+    combined: Vec<u8>,
 
     capture: capture::VTCaptureInternal,
     capture_state: CaptureState,
@@ -450,6 +451,7 @@ impl VTPushParserInput {
             capture_state: CaptureState::None,
             parser: VTPushParser::new(),
             data_accumulator: Vec::with_capacity(256),
+            combined: Vec::new(),
         }
     }
 
@@ -488,15 +490,16 @@ impl VTPushParserInput {
 
         // A chunk that ended on an ambiguous key prefix (a lone `ESC`, `ESC [`, ...)
         // left it in `key_buffer`. Prepend it so the prefix and its continuation
-        // are matched and parsed as one stream, exactly as if fed whole.
-        let mut carried = Vec::new();
+        // are matched and parsed as one stream, exactly as if fed whole. Reuse
+        // `combined` so a byte-at-a-time caller does not allocate per call.
         let mut bytes = bytes;
         if self.key_buffer_len > 0 {
-            carried.reserve(self.key_buffer_len + bytes.len());
-            carried.extend_from_slice(&self.key_buffer[..self.key_buffer_len]);
-            carried.extend_from_slice(bytes);
+            self.combined.clear();
+            self.combined
+                .extend_from_slice(&self.key_buffer[..self.key_buffer_len]);
+            self.combined.extend_from_slice(bytes);
             self.key_buffer_len = 0;
-            bytes = &carried;
+            bytes = &self.combined;
         }
 
         loop {
