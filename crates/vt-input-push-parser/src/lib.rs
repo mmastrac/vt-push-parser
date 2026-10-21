@@ -465,12 +465,7 @@ impl VTPushParserInput {
                         *$capture_state = state;
                     }
                     HandleAction::Unhandled(event) => {
-                        // An OSC payload can span feeds: the core parser hands out
-                        // whatever it has as OscData when a chunk ends inside the
-                        // string, and completes with the remainder in OscEnd. The
-                        // payload is therefore accumulated here rather than passed
-                        // through as a single slice, which made a split reply arrive
-                        // truncated.
+                        // An OSC payload can span feeds.
                         match event {
                             VTEvent::OscStart => $osc.clear(),
                             VTEvent::OscData(data) => $osc.extend_from_slice(data),
@@ -544,11 +539,7 @@ impl VTPushParserInput {
                 });
                 bytes = &bytes[read..];
                 if read == 0 {
-                    // The parser is holding a partial escape (correct: the chunk
-                    // ended mid-sequence) and there is no input left to give it,
-                    // so it consumed nothing. Looping again would re-enter this
-                    // branch with the same empty slice for ever; the next feed
-                    // call resumes the sequence.
+                    // The parser is holding a partial escape, but no input left.
                     return;
                 }
                 continue;
