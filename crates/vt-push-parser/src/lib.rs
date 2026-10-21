@@ -907,8 +907,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                     VTAction::None
                 }
                 DCS => {
-                    // As with CSI above: a new DCS header starts here, so no
-                    // collector may carry state over from an aborted sequence.
+                    // New DCS header starts here, don't carry state over from an aborted sequence.
                     self.clear_hdr_collectors();
                     if INTEREST & VT_PARSER_INTEREST_DCS == 0 {
                         self.st = DcsIgnore;
