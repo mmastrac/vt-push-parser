@@ -453,7 +453,7 @@ impl VTPushParserInput {
         }
     }
 
-    pub fn feed_with(&mut self, mut bytes: &[u8], mut cb: impl FnMut(InputEvent)) {
+    pub fn feed_with(&mut self, bytes: &[u8], mut cb: impl FnMut(InputEvent)) {
         // Handle the result of handle_vt_event, setting up capture or emitting
         // unhandled events as raw CSI.
         macro_rules! dispatch_vt {
@@ -484,6 +484,19 @@ impl VTPushParserInput {
                     }
                 }
             };
+        }
+
+        // A chunk that ended on an ambiguous key prefix (a lone `ESC`, `ESC [`, ...)
+        // left it in `key_buffer`. Prepend it so the prefix and its continuation
+        // are matched and parsed as one stream, exactly as if fed whole.
+        let mut carried = Vec::new();
+        let mut bytes = bytes;
+        if self.key_buffer_len > 0 {
+            carried.reserve(self.key_buffer_len + bytes.len());
+            carried.extend_from_slice(&self.key_buffer[..self.key_buffer_len]);
+            carried.extend_from_slice(bytes);
+            self.key_buffer_len = 0;
+            bytes = &carried;
         }
 
         loop {
@@ -527,7 +540,8 @@ impl VTPushParserInput {
                 continue;
             }
 
-            // If no active capture, feed the parser if it's not in ground state, otherwise the key buffer.
+            // With no capture, feed the parser if it is mid-escape, otherwise
+            // run the key matcher over the input.
             if !self.parser.is_ground() {
                 let capture = &mut self.capture;
                 let capture_state = &mut self.capture_state;
@@ -545,74 +559,35 @@ impl VTPushParserInput {
                 continue;
             }
 
-            // If the key buffer has some bytes, feed more to it
-            if self.key_buffer_len > 0 {
-                let to_copy_into = &mut self.key_buffer[self.key_buffer_len
-                    ..keys::MAX_SEQUENCE_LEN.min(self.key_buffer_len + bytes.len())];
-                to_copy_into.copy_from_slice(&bytes[..to_copy_into.len()]);
-                self.key_buffer_len += to_copy_into.len();
-                bytes = &bytes[to_copy_into.len()..];
-
-                match keys::find_sequence(&self.key_buffer[..self.key_buffer_len]) {
-                    keys::MatchResult::Match { length, what } => {
-                        self.key_buffer.rotate_left(length as _);
-                        self.key_buffer_len -= length as usize;
-                        handle_key_event(what, &mut cb);
-                    }
-                    keys::MatchResult::NoMatch { length } => {
-                        // We don't have a match and we know that at least this many bytes
-                        // won't match.
-                        self.key_buffer.rotate_left(length as _);
-                        let capture = &mut self.capture;
-                        let capture_state = &mut self.capture_state;
-                        let data_accumulator = &mut self.data_accumulator;
-                        // Feed them unconditionally to the parser
-                        self.parser.feed_with_abortable(
-                            &self.key_buffer[keys::MAX_SEQUENCE_LEN - length as usize..],
-                            |event: VTEvent<'_>| {
-                                let action = handle_vt_event(event, &mut cb);
-                                dispatch_vt!(action, cb, capture, capture_state, data_accumulator);
-                                false
-                            },
-                        );
-                    }
-                    keys::MatchResult::PendingMatch => {
-                        // We need more bytes to complete the match, which means we need another
-                        // feed call.
-                        return;
-                    }
+            // If we get this far, we're in the ground state for everything.
+            match keys::find_sequence(bytes) {
+                keys::MatchResult::Match { length, what } => {
+                    bytes = &bytes[length as usize..];
+                    handle_key_event(what, &mut cb);
                 }
-            }
-
-            // If we get this far, we're in the ground state for everything...
-
-            if self.key_buffer_len == 0 {
-                match keys::find_sequence(bytes) {
-                    keys::MatchResult::Match { length, what } => {
-                        bytes = &bytes[length as usize..];
-                        handle_key_event(what, &mut cb);
-                    }
-                    keys::MatchResult::NoMatch { length } => {
-                        // We don't have a match and we know that at least this many bytes
-                        // won't match.
-                        let capture = &mut self.capture;
-                        let capture_state = &mut self.capture_state;
-                        let data_accumulator = &mut self.data_accumulator;
-                        self.parser.feed_with_abortable(
-                            &bytes[..length as usize],
-                            |event: VTEvent<'_>| {
-                                let action = handle_vt_event(event, &mut cb);
-                                dispatch_vt!(action, cb, capture, capture_state, data_accumulator);
-                                false
-                            },
-                        );
-                        bytes = &bytes[length as usize..];
-                    }
-                    keys::MatchResult::PendingMatch => {
-                        // We need more bytes to complete the match, which means we need another
-                        // feed call.
-                        return;
-                    }
+                keys::MatchResult::NoMatch { length } => {
+                    // We don't have a match and we know that at least this many bytes
+                    // won't match.
+                    let capture = &mut self.capture;
+                    let capture_state = &mut self.capture_state;
+                    let data_accumulator = &mut self.data_accumulator;
+                    let read = self.parser.feed_with_abortable(
+                        &bytes[..length as usize],
+                        |event: VTEvent<'_>| {
+                            let action = handle_vt_event(event, &mut cb);
+                            dispatch_vt!(action, cb, capture, capture_state, data_accumulator);
+                            false
+                        },
+                    );
+                    bytes = &bytes[read..];
+                }
+                keys::MatchResult::PendingMatch => {
+                    // The chunk ends on a prefix that may still complete into a
+                    // key sequence. Hold it for the next feed instead of dropping it.
+                    let length = bytes.len().min(keys::MAX_SEQUENCE_LEN);
+                    self.key_buffer[..length].copy_from_slice(&bytes[..length]);
+                    self.key_buffer_len = length;
+                    return;
                 }
             }
         }
