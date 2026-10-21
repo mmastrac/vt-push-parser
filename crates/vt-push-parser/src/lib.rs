@@ -542,18 +542,30 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                     }
                 }
                 VTAction::End(VTEnd::Dcs) => {
-                    state.current_emit = None;
                     let hold = std::mem::take(&mut state.hold);
-                    let range = state.buffer_idx..(i.saturating_sub(hold as usize));
+                    // No buffered bytes means the string had no payload: emit an
+                    // empty slice rather than a stale start index (see OSC below).
+                    let range = match state.current_emit.take() {
+                        Some(_) => state.buffer_idx..(i.saturating_sub(hold as usize)),
+                        None => 0..0,
+                    };
                     if cb.event(VTEvent::DcsEnd(&input[range])).abort() {
                         return i + 1;
                     }
                     held_byte = None;
                 }
                 VTAction::End(VTEnd::Osc { used_bel }) => {
-                    state.current_emit = None;
                     let hold = std::mem::take(&mut state.hold);
-                    let range = state.buffer_idx..(i.saturating_sub(hold as usize));
+                    // `buffer_idx` is set lazily, when the first payload byte is
+                    // buffered. A string with an empty payload never buffers
+                    // anything, so the index would still point into a previous
+                    // emit (the introducer, preceding ground text, or the last
+                    // OSC payload) and `OscEnd.data` would repeat those bytes.
+                    // Nothing buffered means nothing to report.
+                    let range = match state.current_emit.take() {
+                        Some(_) => state.buffer_idx..(i.saturating_sub(hold as usize)),
+                        None => 0..0,
+                    };
                     if cb
                         .event(VTEvent::OscEnd {
                             data: &input[range],
