@@ -897,9 +897,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
                 }
                 CSI => {
                     // A new CSI header starts here. Drop anything left over from
-                    // a sequence that was aborted into CsiIgnore (a stale
-                    // `cur_param` would otherwise prefix the first parameter of
-                    // this sequence).
+                    // a sequence that was aborted.
                     self.clear_hdr_collectors();
                     if INTEREST & VT_PARSER_INTEREST_CSI == 0 {
                         self.st = CsiIgnore;
