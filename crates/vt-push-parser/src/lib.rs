@@ -1854,8 +1854,7 @@ mod tests {
         let ev = collect_debug(b"\x1b[1\x80\x1b[5m");
         assert_eq!(ev, ["Csi('5', '', 'm')"], "{ev:#?}");
 
-        // Same for a DCS header, which reuses the same collectors (with the
-        // leak the first parameter would come out as '11').
+        // Same for a DCS header.
         let ev = collect_debug(b"\x1b[1\x80\x1bP1;2;3|data\x1b\\");
         assert_eq!(
             ev,
