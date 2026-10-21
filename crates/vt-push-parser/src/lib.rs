@@ -172,6 +172,54 @@ def_pattern!(is_final => 0x40..=0x7e);
 def_pattern!(is_priv => b'<' | b'=' | b'>' | b'?');
 def_pattern!(is_priv_no_q => b'<' | b'=' | b'>');
 def_pattern!(is_digit => b'0'..=b'9');
+def_pattern!(is_utf8_cont => 0x80..=0xbf);
+// 0xc0 and 0xc1 only ever start an overlong encoding, so they are collected as a
+// sequence too and then rejected by `is_valid_utf8_sequence`, which emits them
+// as a single Raw event rather than splitting them.
+def_pattern!(is_utf8_lead2 => 0xc0..=0xdf);
+def_pattern!(is_utf8_lead3 => 0xe0..=0xef);
+def_pattern!(is_utf8_lead4 => 0xf0..=0xf4);
+
+/// Check if a byte sequence is valid UTF-8 (no surrogates, no overlongs, in range)
+const fn is_valid_utf8_sequence(seq: &[u8]) -> bool {
+    if seq.is_empty() {
+        return false;
+    }
+    let lead = seq[0];
+    match lead {
+        0xc2..=0xdf => {
+            // 2-byte sequence
+            if seq.len() != 2 {
+                return false;
+            }
+            // 0xc2..=0xdf are all valid leads for 2-byte (no overlongs in this range)
+            true
+        }
+        0xe0..=0xef => {
+            // 3-byte sequence
+            if seq.len() != 3 {
+                return false;
+            }
+            match lead {
+                0xe0 => seq[1] >= 0xa0, // Overlong check: E0 A0..BF
+                0xed => seq[1] <= 0x9f, // Surrogate check: ED 80..9F (not A0..BF)
+                _ => true,
+            }
+        }
+        0xf0..=0xf4 => {
+            // 4-byte sequence
+            if seq.len() != 4 {
+                return false;
+            }
+            match lead {
+                0xf0 => seq[1] >= 0x90, // Overlong check: F0 90..BF
+                0xf4 => seq[1] <= 0x8f, // Range check: F4 80..8F
+                _ => true,
+            }
+        }
+        _ => false,
+    }
+}
 
 macro_rules! byte_predicate {
     (|$p:ident| $body:block) => {{
@@ -223,12 +271,36 @@ pub const VT_PARSER_INTEREST_CSI: u8 = 1 << 0;
 pub const VT_PARSER_INTEREST_DCS: u8 = 1 << 1;
 /// Request OSC events from parser.
 pub const VT_PARSER_INTEREST_OSC: u8 = 1 << 2;
+/// Request [`event::VTEvent::Utf8`] events from parser, one per valid UTF-8
+/// sequence in ground text.
+///
+/// With this flag, plain ASCII in ground state still arrives as
+/// [`event::VTEvent::Raw`], and only valid multi-byte sequences come as
+/// `Utf8`; bytes that are not valid UTF-8 (stray continuation bytes, overlong
+/// or surrogate encodings, sequences broken by a terminator) come as `Raw`
+/// so nothing is lost. A sequence split across [`VTPushParser::feed_with`]
+/// calls is completed on the following feed.
+///
+/// The one exception is a sequence still incomplete when the input ends: it
+/// is held by `feed_with` and discarded by [`VTPushParser::finish`], so a
+/// truncated tail is *not* reported as `Raw` in this mode. Without this flag
+/// the same bytes arrive as part of the preceding `Raw` run instead. This is
+/// deliberate: a truncated sequence is not a character, and reporting it as
+/// text would fabricate one.
+pub const VT_PARSER_INTEREST_UTF8: u8 = 1 << 3;
 /// Request escape recovery events from parser.
 pub const VT_PARSER_INTEREST_ESCAPE_RECOVERY: u8 = 1 << 4;
 /// Request other events from parser.
 pub const VT_PARSER_INTEREST_OTHER: u8 = 1 << 5;
 
 /// Request all events from parser.
+///
+/// This deliberately excludes [`VT_PARSER_INTEREST_UTF8`]: that flag does not
+/// add events, it changes how ground text is reported (each valid multi-byte
+/// sequence becomes its own [`event::VTEvent::Utf8`] instead of being folded
+/// into the surrounding [`event::VTEvent::Raw`]). Enabling it here would change
+/// the events existing `INTEREST_ALL` users see, so ask for it explicitly:
+/// `VT_PARSER_INTEREST_ALL | VT_PARSER_INTEREST_UTF8`.
 pub const VT_PARSER_INTEREST_ALL: u8 = VT_PARSER_INTEREST_CSI
     | VT_PARSER_INTEREST_DCS
     | VT_PARSER_INTEREST_OSC
@@ -236,6 +308,9 @@ pub const VT_PARSER_INTEREST_ALL: u8 = VT_PARSER_INTEREST_CSI
     | VT_PARSER_INTEREST_OTHER;
 
 /// Default interest level.
+///
+/// Like [`VT_PARSER_INTEREST_ALL`], this leaves out [`VT_PARSER_INTEREST_UTF8`]
+/// so that ground text keeps arriving as whole `Raw` runs.
 pub const VT_PARSER_INTEREST_DEFAULT: u8 = VT_PARSER_INTEREST_CSI
     | VT_PARSER_INTEREST_DCS
     | VT_PARSER_INTEREST_OSC
@@ -273,6 +348,11 @@ pub struct VTPushParser<const INTEREST: u8 = VT_PARSER_INTEREST_DEFAULT> {
     cur_param: Param,
     priv_prefix: Option<u8>,
     held_byte: Option<u8>,
+
+    // UTF-8 tracking state (only used when INTEREST includes VT_PARSER_INTEREST_UTF8)
+    // Single coherent state: None = no partial; Some((lead_byte, partial_bytes, needed_continuations))
+    // partial_bytes includes the lead byte and any continuation bytes seen so far
+    utf8_partial: Option<(u8, [u8; 4], u8)>,
 }
 
 impl Default for VTPushParser {
@@ -364,6 +444,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
             cur_param: Param::EMPTY,
             priv_prefix: None,
             held_byte: None,
+            utf8_partial: None,
         }
     }
 
@@ -465,27 +546,175 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         while i < input.len() {
             // Fast path for the common case of no ANSI escape sequences.
             if self.st == State::Ground {
-                let start = i;
-                loop {
-                    if i >= input.len() {
-                        cb.event(VTEvent::Raw(&input[start..]));
-                        return input.len();
-                    }
-                    if ENDS_GROUND[input[i] as usize] {
-                        break;
-                    }
-                    i += 1;
-                }
+                // UTF-8 aware fast path when interest is enabled
+                if INTEREST & VT_PARSER_INTEREST_UTF8 != 0 {
+                    let mut start = i;
 
-                if start != i && cb.event(VTEvent::Raw(&input[start..i])).abort() {
-                    return i;
-                }
+                    // The sequence being collected right now: `seq[..seq_len]` holds
+                    // the bytes seen so far, `seq_expected` how long the whole
+                    // sequence is. It is seeded from the partial an earlier feed
+                    // left behind, so a sequence split across feeds completes.
+                    let mut seq = [0u8; 4];
+                    let mut seq_len = 0usize;
+                    let mut seq_expected = 0usize;
+                    if let Some((lead, buf, needed)) = self.utf8_partial.take() {
+                        // The buffer holds a lead byte and its continuation bytes only,
+                        // so every byte in it is >= 0x80 and 0x00 is unambiguous
+                        // padding for the unused tail. That is what makes this length
+                        // recovery safe: 0x00 is never a legal continuation byte in
+                        // UTF-8, so it cannot be mistaken for one here.
+                        let len = buf.iter().take_while(|&&b| b != 0).count().min(4);
+                        let expected = len + needed as usize;
+                        if len > 0 && expected > len && expected <= 4 {
+                            seq = buf;
+                            seq[0] = lead;
+                            seq_len = len;
+                            seq_expected = expected;
+                        }
+                    }
 
-                if input[i] == ESC {
-                    self.clear_hdr_collectors();
-                    self.st = State::Escape;
-                    i += 1;
-                    continue;
+                    loop {
+                        if i >= input.len() {
+                            // End of input: hold an unfinished sequence for the
+                            // next feed, emit everything else.
+                            if seq_len > 0 {
+                                let mut buf = [0u8; 4];
+                                buf[..seq_len].copy_from_slice(&seq[..seq_len]);
+                                self.utf8_partial =
+                                    Some((seq[0], buf, (seq_expected - seq_len) as u8));
+                            } else if start < i && cb.event(VTEvent::Raw(&input[start..i])).abort()
+                            {
+                                return i;
+                            }
+                            return input.len();
+                        }
+
+                        let b = input[i];
+                        if ENDS_GROUND[b as usize] {
+                            // A terminator ends the run. An unfinished sequence is
+                            // emitted as Raw rather than dropped or reordered, which
+                            // is what the non-UTF-8 path emits for those bytes.
+                            let pending = std::mem::take(&mut seq_len);
+                            self.utf8_partial = None;
+                            let aborted = if pending > 0 {
+                                cb.event(VTEvent::Raw(&seq[..pending])).abort()
+                            } else if start < i {
+                                cb.event(VTEvent::Raw(&input[start..i])).abort()
+                            } else {
+                                false
+                            };
+                            if aborted {
+                                return i;
+                            }
+                            break;
+                        }
+
+                        if seq_len > 0 {
+                            if is_utf8_cont(b) {
+                                seq[seq_len] = b;
+                                seq_len += 1;
+                                i += 1;
+                                if seq_len == seq_expected {
+                                    let done = cb
+                                        .event(if is_valid_utf8_sequence(&seq[..seq_len]) {
+                                            VTEvent::Utf8(&seq[..seq_len])
+                                        } else {
+                                            // Surrogate, overlong or out of range: not
+                                            // UTF-8, so it travels as Raw.
+                                            VTEvent::Raw(&seq[..seq_len])
+                                        })
+                                        .abort();
+                                    seq_len = 0;
+                                    start = i;
+                                    if done {
+                                        return i;
+                                    }
+                                }
+                                continue;
+                            }
+
+                            // Not a continuation: the sequence is broken. Emit what
+                            // we have as Raw and look at this byte again.
+                            let pending = std::mem::take(&mut seq_len);
+                            start = i;
+                            if cb.event(VTEvent::Raw(&seq[..pending])).abort() {
+                                return i;
+                            }
+                        }
+
+                        let expected = if is_utf8_lead2(b) {
+                            2
+                        } else if is_utf8_lead3(b) {
+                            3
+                        } else if is_utf8_lead4(b) {
+                            4
+                        } else {
+                            0
+                        };
+
+                        if expected > 0 {
+                            // Flush the raw run, then start collecting.
+                            if start < i && cb.event(VTEvent::Raw(&input[start..i])).abort() {
+                                return i;
+                            }
+                            start = i;
+                            seq = [0u8; 4];
+                            seq[0] = b;
+                            seq_len = 1;
+                            seq_expected = expected;
+                            i += 1;
+                            continue;
+                        }
+
+                        if is_utf8_cont(b) {
+                            // A continuation byte with no lead byte is invalid on
+                            // its own and travels as its own Raw event.
+                            if start < i && cb.event(VTEvent::Raw(&input[start..i])).abort() {
+                                return i;
+                            }
+                            let done = cb.event(VTEvent::Raw(&[b])).abort();
+                            i += 1;
+                            start = i;
+                            if done {
+                                return i;
+                            }
+                            continue;
+                        }
+
+                        // Anything else belongs to the raw run.
+                        i += 1;
+                    }
+
+                    if input[i] == ESC {
+                        self.clear_hdr_collectors();
+                        self.st = State::Escape;
+                        i += 1;
+                        continue;
+                    }
+                } else {
+                    // Original fast path without UTF-8 tracking
+                    let start = i;
+                    loop {
+                        if i >= input.len() {
+                            cb.event(VTEvent::Raw(&input[start..]));
+                            return input.len();
+                        }
+                        if ENDS_GROUND[input[i] as usize] {
+                            break;
+                        }
+                        i += 1;
+                    }
+
+                    if start != i && cb.event(VTEvent::Raw(&input[start..i])).abort() {
+                        return i;
+                    }
+
+                    if input[i] == ESC {
+                        self.clear_hdr_collectors();
+                        self.st = State::Escape;
+                        i += 1;
+                        continue;
+                    }
                 }
             }
 
@@ -686,8 +915,15 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
     /// - an unterminated OSC or DCS string is cancelled;
     /// - an incomplete escape sequence is recovered exactly as [`idle`] does.
     ///
-    /// Anything else in flight is discarded.
+    /// Anything else in flight is discarded, including a pending partial UTF-8
+    /// sequence when [`VT_PARSER_INTEREST_UTF8`] is enabled: the bytes of a
+    /// truncated sequence are not a character, so there is no text to report.
     pub fn finish<F: FnMut(VTEvent)>(&mut self, mut cb: F) {
+        // Drop, don't flush: a partial sequence is not text. (Note that a parser
+        // without the UTF-8 flag has already emitted these bytes as `Raw`, so
+        // this is a deliberate difference between the two modes.)
+        self.utf8_partial = None;
+
         let held = self.held_byte.take();
 
         // Emit a held ESC as data.
@@ -745,6 +981,7 @@ impl<const INTEREST: u8> VTPushParser<INTEREST> {
         self.params.clear();
         self.cur_param.clear();
         self.priv_prefix = None;
+        self.utf8_partial = None;
     }
 
     fn reset_collectors(&mut self) {
