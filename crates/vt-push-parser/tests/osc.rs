@@ -1,13 +1,4 @@
 //! Regression tests for OSC payload handling.
-//!
-//! An OSC stream with an empty payload used to report a stale slice as
-//! `OscEnd.data`: whatever the parser had buffered last, i.e. the introducer,
-//! preceding ground text, or even the previous OSC's payload. Since `encode()`
-//! writes `data` back out, those duplicated bytes corrupted any stream rebuilt
-//! from the events.
-//!
-//! Each `empty_osc_*` test below is one row of the reported table; every one of
-//! them fails on `58c84fb8`.
 
 use pretty_assertions::assert_eq;
 use vt_push_parser::VTPushParser;
