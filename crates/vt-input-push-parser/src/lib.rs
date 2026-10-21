@@ -489,10 +489,8 @@ impl VTPushParserInput {
         }
 
         // A chunk that ended on an ambiguous key prefix (a lone `ESC`, `ESC [`, ...)
-        // left it in `key_buffer`. Prepend it so the prefix and its continuation
-        // are matched and parsed as one stream, exactly as if fed whole. A small
-        // stack buffer covers the byte-at-a-time case; `combined` covers larger
-        // chunks without allocating per call.
+        // put it in `key_buffer`. Prepend it so the prefix and its continuation
+        // are matched.
         let mut scratch = [0u8; keys::MAX_SEQUENCE_LEN + 1];
         let mut bytes = bytes;
         if self.key_buffer_len > 0 {
@@ -513,8 +511,7 @@ impl VTPushParserInput {
 
         loop {
             if bytes.is_empty() {
-                // Nothing left to feed. The parser may hold a partial escape
-                // for the next call; any carried prefix was prepended already.
+                // Nothing left to feed.
                 return;
             }
 
