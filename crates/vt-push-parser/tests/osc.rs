@@ -46,7 +46,7 @@ fn empty_osc_after_csi() {
 
 #[test]
 fn empty_osc_after_previous_osc() {
-    // Second `data` repeated the first payload, slice start was stale.
+    // Second `data` repeated the first payload: stale slice start.
     assert_eq!(
         osc_ends(b"\x1b]0;A\x07\x1b]\x07"),
         vec![(b"0;A".to_vec(), true), EMPTY_BEL]
