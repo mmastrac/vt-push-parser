@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **OSC/DCS**: an empty string payload no longer reports a stale slice in
   `OscEnd.data` / `DcsEnd`.
+- **Input parser**: `VTPushParserInput::feed_with` spun forever when a chunk ended
+  mid-escape (for example `\x1b]0;` followed by `title\x07`).
+- **Input parser**: an OSC payload split across feeds is accumulated instead of
+  being emitted truncated from `OscEnd`.
 
 ### Changed
 

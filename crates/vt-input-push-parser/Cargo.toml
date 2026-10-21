@@ -12,6 +12,9 @@ repository.workspace = true
 [build]
 build-script = "build.rs"
 
+[dev-dependencies]
+ntest = "0.9"
+
 [build-dependencies]
 vt-push-parser.workspace = true
 

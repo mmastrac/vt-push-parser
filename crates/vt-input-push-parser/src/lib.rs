@@ -457,7 +457,7 @@ impl VTPushParserInput {
         // Handle the result of handle_vt_event, setting up capture or emitting
         // unhandled events as raw CSI.
         macro_rules! dispatch_vt {
-            ($action:expr, $cb:expr, $capture:expr, $capture_state:expr) => {
+            ($action:expr, $cb:expr, $capture:expr, $capture_state:expr, $osc:expr) => {
                 match $action {
                     HandleAction::Handled => {}
                     HandleAction::Capture(state, internal) => {
@@ -465,16 +465,21 @@ impl VTPushParserInput {
                         *$capture_state = state;
                     }
                     HandleAction::Unhandled(event) => {
-                        let input_event = match event {
-                            VTEvent::Csi(csi) => Some(InputEvent::Csi(csi)),
-                            VTEvent::OscEnd { data, .. } => Some(InputEvent::Osc(data)),
-                            VTEvent::DcsEnd(data) => Some(InputEvent::Dcs(data)),
-                            VTEvent::Ss2(ss2) => Some(InputEvent::Ss2(ss2)),
-                            VTEvent::Ss3(ss3) => Some(InputEvent::Ss3(ss3)),
-                            _ => None,
-                        };
-                        if let Some(e) = input_event {
-                            $cb(e);
+                        // An OSC payload can span feeds.
+                        match event {
+                            VTEvent::OscStart => $osc.clear(),
+                            VTEvent::OscData(data) => $osc.extend_from_slice(data),
+                            VTEvent::OscEnd { data, .. } => {
+                                $osc.extend_from_slice(data);
+                                $cb(InputEvent::Osc($osc.as_slice()));
+                                $osc.clear();
+                            }
+                            VTEvent::OscCancel => $osc.clear(),
+                            VTEvent::Csi(csi) => $cb(InputEvent::Csi(csi)),
+                            VTEvent::DcsEnd(data) => $cb(InputEvent::Dcs(data)),
+                            VTEvent::Ss2(ss2) => $cb(InputEvent::Ss2(ss2)),
+                            VTEvent::Ss3(ss3) => $cb(InputEvent::Ss3(ss3)),
+                            _ => {}
                         }
                     }
                 }
@@ -526,12 +531,17 @@ impl VTPushParserInput {
             if !self.parser.is_ground() {
                 let capture = &mut self.capture;
                 let capture_state = &mut self.capture_state;
+                let data_accumulator = &mut self.data_accumulator;
                 let read = self.parser.feed_with_abortable(bytes, |event: VTEvent| {
                     let action = handle_vt_event(event, &mut cb);
-                    dispatch_vt!(action, cb, capture, capture_state);
+                    dispatch_vt!(action, cb, capture, capture_state, data_accumulator);
                     false
                 });
                 bytes = &bytes[read..];
+                if read == 0 {
+                    // Parser holds a partial escape, but no input left.
+                    return;
+                }
                 continue;
             }
 
@@ -555,12 +565,13 @@ impl VTPushParserInput {
                         self.key_buffer.rotate_left(length as _);
                         let capture = &mut self.capture;
                         let capture_state = &mut self.capture_state;
+                        let data_accumulator = &mut self.data_accumulator;
                         // Feed them unconditionally to the parser
                         self.parser.feed_with_abortable(
                             &self.key_buffer[keys::MAX_SEQUENCE_LEN - length as usize..],
                             |event: VTEvent<'_>| {
                                 let action = handle_vt_event(event, &mut cb);
-                                dispatch_vt!(action, cb, capture, capture_state);
+                                dispatch_vt!(action, cb, capture, capture_state, data_accumulator);
                                 false
                             },
                         );
@@ -586,11 +597,12 @@ impl VTPushParserInput {
                         // won't match.
                         let capture = &mut self.capture;
                         let capture_state = &mut self.capture_state;
+                        let data_accumulator = &mut self.data_accumulator;
                         self.parser.feed_with_abortable(
                             &bytes[..length as usize],
                             |event: VTEvent<'_>| {
                                 let action = handle_vt_event(event, &mut cb);
-                                dispatch_vt!(action, cb, capture, capture_state);
+                                dispatch_vt!(action, cb, capture, capture_state, data_accumulator);
                                 false
                             },
                         );
@@ -609,6 +621,8 @@ impl VTPushParserInput {
 
 #[cfg(test)]
 mod tests {
+    use ntest::timeout;
+
     use super::*;
 
     #[test]
@@ -1011,5 +1025,105 @@ mod tests {
             })
         );
         assert_eq!(events[1], InputEvent::KeyChar('a', Modifier::empty()));
+    }
+
+    // Tests use ntest timeouts, since chunks may end mid-escape.
+
+    const ESCAPE_CORPUS: &str = include_str!("../../vt-push-parser/tests/escapes.txt");
+
+    fn describe_event(event: InputEvent<'_>) -> String {
+        match event {
+            InputEvent::Osc(data) => format!("Osc({:?})", String::from_utf8_lossy(data)),
+            event => format!("{event:?}"),
+        }
+    }
+
+    fn feed_chunks(chunks: Vec<Vec<u8>>) -> Vec<String> {
+        let mut parser = VTPushParserInput::new();
+        let mut events = Vec::new();
+        for chunk in &chunks {
+            parser.feed_with(chunk, |event| events.push(describe_event(event)));
+        }
+        events
+    }
+
+    #[test]
+    #[timeout(10_000)]
+    fn feed_with_returns_when_a_chunk_ends_mid_escape() {
+        // Split every escape everywhere. All hung before the fix.
+        let mut cases = 0;
+        for line in ESCAPE_CORPUS.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let decoded = vt_push_parser::ascii::decode_string(line);
+            for split in 1..decoded.len() {
+                cases += 1;
+                feed_chunks(vec![decoded[..split].to_vec(), decoded[split..].to_vec()]);
+            }
+        }
+        assert!(cases > 1000, "escape corpus unexpectedly small: {cases}");
+    }
+
+    #[test]
+    #[timeout(10_000)]
+    fn empty_chunks_after_a_partial_escape_do_not_spin() {
+        let mut parser = VTPushParserInput::new();
+        let mut events = Vec::new();
+        parser.feed_with(b"\x1b]0;", |event| events.push(describe_event(event)));
+        for _ in 0..4 {
+            parser.feed_with(b"", |event| events.push(describe_event(event)));
+        }
+        parser.feed_with(b"title\x07", |event| events.push(describe_event(event)));
+        assert_eq!(events, ["Osc(\"0;title\")"]);
+    }
+
+    #[test]
+    #[timeout(10_000)]
+    fn osc_payload_split_across_feeds_is_not_truncated() {
+        let bytes = b"\x1b]0;title\x07";
+        let whole = feed_chunks(vec![bytes.to_vec()]);
+        assert_eq!(whole, ["Osc(\"0;title\")"]);
+
+        // Split after the introducer. A trailing lone ESC is excluded.
+        for split in 2..bytes.len() {
+            let split_events = feed_chunks(vec![bytes[..split].to_vec(), bytes[split..].to_vec()]);
+            assert_eq!(
+                split_events, whole,
+                "OSC payload truncated, split at {split}"
+            );
+        }
+
+        let three_ways = feed_chunks(vec![
+            b"\x1b]0;".to_vec(),
+            b"tit".to_vec(),
+            b"le\x07".to_vec(),
+        ]);
+        assert_eq!(three_ways, whole);
+    }
+
+    #[test]
+    #[timeout(10_000)]
+    fn osc_terminated_by_st_and_split_before_it() {
+        let bytes = b"\x1b]11;rgb:000/fff/000\x1b\\";
+        let whole = feed_chunks(vec![bytes.to_vec()]);
+        assert_eq!(whole, ["Osc(\"11;rgb:000/fff/000\")"]);
+
+        let split = feed_chunks(vec![
+            bytes[..bytes.len() - 1].to_vec(),
+            bytes[bytes.len() - 1..].to_vec(),
+        ]);
+        assert_eq!(split, whole);
+    }
+
+    #[test]
+    #[timeout(10_000)]
+    fn csi_split_across_feeds_terminates() {
+        // Payload is dropped on some splits. Only termination is pinned.
+        let bytes = b"\x1b[1;2m";
+        for split in 1..bytes.len() {
+            feed_chunks(vec![bytes[..split].to_vec(), bytes[split..].to_vec()]);
+        }
     }
 }
