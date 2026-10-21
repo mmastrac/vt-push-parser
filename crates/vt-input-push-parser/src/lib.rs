@@ -503,6 +503,12 @@ impl VTPushParserInput {
         }
 
         loop {
+            if bytes.is_empty() {
+                // Nothing left to feed. The parser may hold a partial escape
+                // for the next call; the key prefix is already in `combined`.
+                return;
+            }
+
             // First, check if we have an active capture.
             if let Some(captured) = self.capture.feed(&mut bytes) {
                 self.data_accumulator.extend_from_slice(captured);
