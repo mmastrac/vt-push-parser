@@ -1205,30 +1205,17 @@ mod tests {
         false
     }
 
-    /// Lines that hit a separate pre-existing whole-feed loss: an ignored DCS or
-    /// a CSI cancelled by CAN/SUB resumes to ground without an event the input
-    /// parser forwards, so trailing text in the same feed is swallowed.
-    /// Reported but not fixed here.
-    fn whole_feed_loses_trailing_text(bytes: &[u8]) -> bool {
-        bytes.windows(3).any(|w| w == b"\x1bP:") || bytes.iter().any(|b| matches!(b, 0x18 | 0x1a))
-    }
-
     #[test]
     #[timeout(10_000)]
     fn every_escape_split_has_the_whole_event_stream() {
         let mut compared = 0;
         let mut skipped_dcs = 0;
-        let mut skipped_whole_loss = 0;
         for line in ESCAPE_CORPUS.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
             let decoded = vt_push_parser::ascii::decode_string(line);
-            if whole_feed_loses_trailing_text(&decoded) {
-                skipped_whole_loss += 1;
-                continue;
-            }
             let whole = feed_chunks(vec![decoded.clone()]);
             for split in 1..decoded.len() {
                 if split_inside_dcs(&decoded, split) {
@@ -1246,9 +1233,5 @@ mod tests {
         }
         assert!(compared > 800, "compared too few splits: {compared}");
         assert!(skipped_dcs > 0, "DCS exclusion did not trigger");
-        assert!(
-            skipped_whole_loss > 0,
-            "known whole-feed loss exclusion did not trigger"
-        );
     }
 }
