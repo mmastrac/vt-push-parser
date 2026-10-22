@@ -481,6 +481,26 @@ impl VTPushParserInput {
                             VTEvent::DcsEnd(data) => $cb(InputEvent::Dcs(data)),
                             VTEvent::Ss2(ss2) => $cb(InputEvent::Ss2(ss2)),
                             VTEvent::Ss3(ss3) => $cb(InputEvent::Ss3(ss3)),
+                            VTEvent::Raw(data) => {
+                                // Plain text from ground state: emit as Char events.
+                                let mut i = 0;
+                                while i < data.len() {
+                                    match std::str::from_utf8(&data[i..]) {
+                                        Ok(s) => {
+                                            for ch in s.chars() {
+                                                $cb(InputEvent::Char(ch));
+                                                i += ch.len_utf8();
+                                            }
+                                            break;
+                                        }
+                                        Err(e) => {
+                                            // Invalid UTF-8: emit replacement char and skip the bad byte.
+                                            $cb(InputEvent::Char('\u{FFFD}'));
+                                            i += e.valid_up_to() + 1;
+                                        }
+                                    }
+                                }
+                            }
                             _ => {}
                         }
                     }
