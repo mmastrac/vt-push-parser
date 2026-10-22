@@ -490,7 +490,6 @@ impl VTPushParserInput {
                                         Ok(s) => {
                                             for ch in s.chars() {
                                                 $cb(InputEvent::KeyChar(ch, Modifier(0)));
-                                                i += ch.len_utf8();
                                             }
                                             break;
                                         }
