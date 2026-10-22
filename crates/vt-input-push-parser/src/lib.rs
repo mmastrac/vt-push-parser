@@ -329,6 +329,7 @@ pub struct VTPushParserInput {
     key_buffer: [u8; keys::MAX_SEQUENCE_LEN],
     key_buffer_len: usize,
     data_accumulator: Vec<u8>,
+    combined: Vec<u8>,
 
     capture: capture::VTCaptureInternal,
     capture_state: CaptureState,
@@ -450,10 +451,11 @@ impl VTPushParserInput {
             capture_state: CaptureState::None,
             parser: VTPushParser::new(),
             data_accumulator: Vec::with_capacity(256),
+            combined: Vec::new(),
         }
     }
 
-    pub fn feed_with(&mut self, mut bytes: &[u8], mut cb: impl FnMut(InputEvent)) {
+    pub fn feed_with(&mut self, bytes: &[u8], mut cb: impl FnMut(InputEvent)) {
         // Handle the result of handle_vt_event, setting up capture or emitting
         // unhandled events as raw CSI.
         macro_rules! dispatch_vt {
@@ -479,6 +481,26 @@ impl VTPushParserInput {
                             VTEvent::DcsEnd(data) => $cb(InputEvent::Dcs(data)),
                             VTEvent::Ss2(ss2) => $cb(InputEvent::Ss2(ss2)),
                             VTEvent::Ss3(ss3) => $cb(InputEvent::Ss3(ss3)),
+                            VTEvent::Raw(data) => {
+                                // Plain text from ground state: emit as KeyChar events
+                                // (matching the key matcher path) with no modifiers.
+                                let mut i = 0;
+                                while i < data.len() {
+                                    match std::str::from_utf8(&data[i..]) {
+                                        Ok(s) => {
+                                            for ch in s.chars() {
+                                                $cb(InputEvent::KeyChar(ch, Modifier(0)));
+                                            }
+                                            break;
+                                        }
+                                        Err(e) => {
+                                            // Invalid UTF-8: emit replacement char and skip the bad byte.
+                                            $cb(InputEvent::KeyChar('\u{FFFD}', Modifier(0)));
+                                            i += e.valid_up_to() + 1;
+                                        }
+                                    }
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -486,7 +508,33 @@ impl VTPushParserInput {
             };
         }
 
+        // A chunk that ended on an ambiguous key prefix (a lone `ESC`, `ESC [`, ...)
+        // put it in `key_buffer`. Prepend it so the prefix and its continuation
+        // are matched.
+        let mut scratch = [0u8; keys::MAX_SEQUENCE_LEN + 1];
+        let mut bytes = bytes;
+        if self.key_buffer_len > 0 {
+            let prefix_len = self.key_buffer_len;
+            if prefix_len + bytes.len() <= scratch.len() {
+                scratch[..prefix_len].copy_from_slice(&self.key_buffer[..prefix_len]);
+                scratch[prefix_len..prefix_len + bytes.len()].copy_from_slice(bytes);
+                bytes = &scratch[..prefix_len + bytes.len()];
+            } else {
+                self.combined.clear();
+                self.combined
+                    .extend_from_slice(&self.key_buffer[..prefix_len]);
+                self.combined.extend_from_slice(bytes);
+                bytes = &self.combined;
+            }
+            self.key_buffer_len = 0;
+        }
+
         loop {
+            if bytes.is_empty() {
+                // Nothing left to feed.
+                return;
+            }
+
             // First, check if we have an active capture.
             if let Some(captured) = self.capture.feed(&mut bytes) {
                 self.data_accumulator.extend_from_slice(captured);
@@ -527,7 +575,8 @@ impl VTPushParserInput {
                 continue;
             }
 
-            // If no active capture, feed the parser if it's not in ground state, otherwise the key buffer.
+            // With no capture, feed the parser if it is mid-escape, otherwise
+            // run the key matcher over the input.
             if !self.parser.is_ground() {
                 let capture = &mut self.capture;
                 let capture_state = &mut self.capture_state;
@@ -538,81 +587,45 @@ impl VTPushParserInput {
                     false
                 });
                 bytes = &bytes[read..];
-                if read == 0 {
+                if read == 0 || bytes.is_empty() {
                     // Parser holds a partial escape, but no input left.
                     return;
                 }
                 continue;
             }
 
-            // If the key buffer has some bytes, feed more to it
-            if self.key_buffer_len > 0 {
-                let to_copy_into = &mut self.key_buffer[self.key_buffer_len
-                    ..keys::MAX_SEQUENCE_LEN.min(self.key_buffer_len + bytes.len())];
-                to_copy_into.copy_from_slice(&bytes[..to_copy_into.len()]);
-                self.key_buffer_len += to_copy_into.len();
-                bytes = &bytes[to_copy_into.len()..];
-
-                match keys::find_sequence(&self.key_buffer[..self.key_buffer_len]) {
-                    keys::MatchResult::Match { length, what } => {
-                        self.key_buffer.rotate_left(length as _);
-                        self.key_buffer_len -= length as usize;
-                        handle_key_event(what, &mut cb);
-                    }
-                    keys::MatchResult::NoMatch { length } => {
-                        // We don't have a match and we know that at least this many bytes
-                        // won't match.
-                        self.key_buffer.rotate_left(length as _);
-                        let capture = &mut self.capture;
-                        let capture_state = &mut self.capture_state;
-                        let data_accumulator = &mut self.data_accumulator;
-                        // Feed them unconditionally to the parser
-                        self.parser.feed_with_abortable(
-                            &self.key_buffer[keys::MAX_SEQUENCE_LEN - length as usize..],
-                            |event: VTEvent<'_>| {
-                                let action = handle_vt_event(event, &mut cb);
-                                dispatch_vt!(action, cb, capture, capture_state, data_accumulator);
-                                false
-                            },
-                        );
-                    }
-                    keys::MatchResult::PendingMatch => {
-                        // We need more bytes to complete the match, which means we need another
-                        // feed call.
+            // If we get this far, we're in the ground state for everything.
+            match keys::find_sequence(bytes) {
+                keys::MatchResult::Match { length, what } => {
+                    bytes = &bytes[length as usize..];
+                    handle_key_event(what, &mut cb);
+                }
+                keys::MatchResult::NoMatch { length } => {
+                    // We don't have a match and we know that at least this many bytes
+                    // won't match.
+                    let capture = &mut self.capture;
+                    let capture_state = &mut self.capture_state;
+                    let data_accumulator = &mut self.data_accumulator;
+                    let read = self.parser.feed_with_abortable(
+                        &bytes[..length as usize],
+                        |event: VTEvent<'_>| {
+                            let action = handle_vt_event(event, &mut cb);
+                            dispatch_vt!(action, cb, capture, capture_state, data_accumulator);
+                            false
+                        },
+                    );
+                    bytes = &bytes[read..];
+                    if read == 0 || bytes.is_empty() {
                         return;
                     }
                 }
-            }
-
-            // If we get this far, we're in the ground state for everything...
-
-            if self.key_buffer_len == 0 {
-                match keys::find_sequence(bytes) {
-                    keys::MatchResult::Match { length, what } => {
-                        bytes = &bytes[length as usize..];
-                        handle_key_event(what, &mut cb);
-                    }
-                    keys::MatchResult::NoMatch { length } => {
-                        // We don't have a match and we know that at least this many bytes
-                        // won't match.
-                        let capture = &mut self.capture;
-                        let capture_state = &mut self.capture_state;
-                        let data_accumulator = &mut self.data_accumulator;
-                        self.parser.feed_with_abortable(
-                            &bytes[..length as usize],
-                            |event: VTEvent<'_>| {
-                                let action = handle_vt_event(event, &mut cb);
-                                dispatch_vt!(action, cb, capture, capture_state, data_accumulator);
-                                false
-                            },
-                        );
-                        bytes = &bytes[length as usize..];
-                    }
-                    keys::MatchResult::PendingMatch => {
-                        // We need more bytes to complete the match, which means we need another
-                        // feed call.
-                        return;
-                    }
+                keys::MatchResult::PendingMatch => {
+                    // The chunk ends on a prefix that may still complete into a
+                    // key sequence. Hold it for the next feed instead of dropping it.
+                    let length = bytes.len().min(keys::MAX_SEQUENCE_LEN);
+                    self.key_buffer[..length].copy_from_slice(&bytes[..length]);
+                    self.key_buffer_len = length;
+                    return;
                 }
             }
         }
@@ -1119,11 +1132,126 @@ mod tests {
 
     #[test]
     #[timeout(10_000)]
-    fn csi_split_across_feeds_terminates() {
-        // Payload is dropped on some splits. Only termination is pinned.
+    fn csi_split_across_feeds_has_the_whole_event_stream() {
+        // Both `ESC [` and a lone `ESC` at a chunk boundary used to be dropped.
         let bytes = b"\x1b[1;2m";
+        let whole = feed_chunks(vec![bytes.to_vec()]);
+        assert_eq!(whole, ["Csi(Csi('1', '2', '', 'm'))"]);
         for split in 1..bytes.len() {
-            feed_chunks(vec![bytes[..split].to_vec(), bytes[split..].to_vec()]);
+            let split_events = feed_chunks(vec![bytes[..split].to_vec(), bytes[split..].to_vec()]);
+            assert_eq!(split_events, whole, "CSI lost, split at {split}");
         }
+    }
+
+    #[test]
+    #[timeout(10_000)]
+    fn csi_split_three_ways_is_not_lost() {
+        // CSI 15 ~ is surfaced as a raw CSI event, not a key. Split inside
+        // both the introducer and the parameters.
+        let whole = feed_chunks(vec![b"\x1b[15~".to_vec()]);
+        assert_eq!(whole, ["Csi(Csi('15', '', '~'))"]);
+        let three_ways = feed_chunks(vec![b"\x1b".to_vec(), b"[1".to_vec(), b"5~".to_vec()]);
+        assert_eq!(three_ways, whole);
+    }
+
+    #[test]
+    #[timeout(10_000)]
+    fn ss2_and_ss3_split_at_the_introducer_are_not_lost() {
+        for bytes in [b"\x1bOA".as_slice(), b"\x1bNA".as_slice()] {
+            let whole = feed_chunks(vec![bytes.to_vec()]);
+            assert_eq!(whole.len(), 1);
+            for split in 1..bytes.len() {
+                let split_events =
+                    feed_chunks(vec![bytes[..split].to_vec(), bytes[split..].to_vec()]);
+                assert_eq!(split_events, whole, "SS2/SS3 lost, split at {split}");
+            }
+        }
+    }
+
+    #[test]
+    #[timeout(10_000)]
+    fn osc_split_after_the_esc_introducer_is_not_lost() {
+        let bytes = b"\x1b]0;title\x07";
+        let whole = feed_chunks(vec![bytes.to_vec()]);
+        assert_eq!(whole, ["Osc(\"0;title\")"]);
+        let split = feed_chunks(vec![b"\x1b".to_vec(), b"]0;title\x07".to_vec()]);
+        assert_eq!(split, whole);
+    }
+
+    #[test]
+    #[timeout(10_000)]
+    fn dcs_split_after_the_esc_introducer_is_not_lost() {
+        let bytes = b"\x1bP1;2;3|data\x1b\\";
+        let whole = feed_chunks(vec![bytes.to_vec()]);
+        assert_eq!(whole, ["Dcs([100, 97, 116, 97])"]);
+        let split = feed_chunks(vec![b"\x1b".to_vec(), b"P1;2;3|data\x1b\\".to_vec()]);
+        assert_eq!(split, whole);
+    }
+
+    /// True if `split` falls inside a DCS string (after `ESC P`, before its
+    /// terminator). `DcsEnd` payload accumulation is a separate task, so those
+    /// splits cannot be compared event-for-event yet.
+    fn split_inside_dcs(bytes: &[u8], split: usize) -> bool {
+        let mut i = 0;
+        while i < split {
+            if bytes[i] == 0x1b && bytes.get(i + 1) == Some(&b'P') {
+                i += 2;
+                let mut open = true;
+                while i < split {
+                    match bytes[i] {
+                        0x18 | 0x1a => {
+                            open = false;
+                            i += 1;
+                            break;
+                        }
+                        0x1b => {
+                            if bytes.get(i + 1) == Some(&b'\\') && i + 1 < split {
+                                open = false;
+                                i += 2;
+                                break;
+                            }
+                            i += 1;
+                        }
+                        _ => i += 1,
+                    }
+                }
+                if open {
+                    return true;
+                }
+            } else {
+                i += 1;
+            }
+        }
+        false
+    }
+
+    #[test]
+    #[timeout(10_000)]
+    fn every_escape_split_has_the_whole_event_stream() {
+        let mut compared = 0;
+        let mut skipped_dcs = 0;
+        for line in ESCAPE_CORPUS.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let decoded = vt_push_parser::ascii::decode_string(line);
+            let whole = feed_chunks(vec![decoded.clone()]);
+            for split in 1..decoded.len() {
+                if split_inside_dcs(&decoded, split) {
+                    skipped_dcs += 1;
+                    continue;
+                }
+                compared += 1;
+                let split_events =
+                    feed_chunks(vec![decoded[..split].to_vec(), decoded[split..].to_vec()]);
+                assert_eq!(
+                    split_events, whole,
+                    "event stream changed, line {line:?} split at {split}"
+                );
+            }
+        }
+        assert!(compared > 800, "compared too few splits: {compared}");
+        assert!(skipped_dcs > 0, "DCS exclusion did not trigger");
     }
 }
