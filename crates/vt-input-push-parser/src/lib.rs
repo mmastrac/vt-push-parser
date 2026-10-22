@@ -457,9 +457,8 @@ impl VTPushParserInput {
 
     pub fn feed_with(&mut self, bytes: &[u8], mut cb: impl FnMut(InputEvent)) {
         // Handle the result of handle_vt_event, setting up capture or emitting
-        // unhandled events as raw CSI.
         macro_rules! dispatch_vt {
-            ($action:expr, $cb:expr, $capture:expr, $capture_state:expr, $osc:expr) => {
+            ($action:expr, $cb:expr, $capture:expr, $capture_state:expr, $data_acc:expr) => {
                 match $action {
                     HandleAction::Handled => {}
                     HandleAction::Capture(state, internal) => {
@@ -467,18 +466,25 @@ impl VTPushParserInput {
                         *$capture_state = state;
                     }
                     HandleAction::Unhandled(event) => {
-                        // An OSC payload can span feeds.
+                        // An OSC or DCS payload can span feeds.
                         match event {
-                            VTEvent::OscStart => $osc.clear(),
-                            VTEvent::OscData(data) => $osc.extend_from_slice(data),
+                            VTEvent::OscStart => $data_acc.clear(),
+                            VTEvent::OscData(data) => $data_acc.extend_from_slice(data),
                             VTEvent::OscEnd { data, .. } => {
-                                $osc.extend_from_slice(data);
-                                $cb(InputEvent::Osc($osc.as_slice()));
-                                $osc.clear();
+                                $data_acc.extend_from_slice(data);
+                                $cb(InputEvent::Osc($data_acc.as_slice()));
+                                $data_acc.clear();
                             }
-                            VTEvent::OscCancel => $osc.clear(),
+                            VTEvent::OscCancel => $data_acc.clear(),
+                            VTEvent::DcsStart(_) => $data_acc.clear(),
+                            VTEvent::DcsData(data) => $data_acc.extend_from_slice(data),
+                            VTEvent::DcsEnd(data) => {
+                                $data_acc.extend_from_slice(data);
+                                $cb(InputEvent::Dcs($data_acc.as_slice()));
+                                $data_acc.clear();
+                            }
+                            VTEvent::DcsCancel => $data_acc.clear(),
                             VTEvent::Csi(csi) => $cb(InputEvent::Csi(csi)),
-                            VTEvent::DcsEnd(data) => $cb(InputEvent::Dcs(data)),
                             VTEvent::Ss2(ss2) => $cb(InputEvent::Ss2(ss2)),
                             VTEvent::Ss3(ss3) => $cb(InputEvent::Ss3(ss3)),
                             VTEvent::Raw(data) => {
@@ -507,10 +513,7 @@ impl VTPushParserInput {
                 }
             };
         }
-
-        // A chunk that ended on an ambiguous key prefix (a lone `ESC`, `ESC [`, ...)
-        // put it in `key_buffer`. Prepend it so the prefix and its continuation
-        // are matched.
+        // unhandled events as raw CSI.
         let mut scratch = [0u8; keys::MAX_SEQUENCE_LEN + 1];
         let mut bytes = bytes;
         if self.key_buffer_len > 0 {
