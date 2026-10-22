@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mid-escape (for example `\x1b]0;` followed by `title\x07`).
 - **Input parser**: an OSC payload split across feeds is accumulated instead of
   being emitted truncated from `OscEnd`.
+- **Input parser**: a DCS payload split across feeds is accumulated instead of
+  being emitted truncated from `DcsEnd`.
 - **Input parser**: a pending key prefix (`ESC`, `ESC [`, ...) at the end of a
   chunk is carried into the next `feed_with` call instead of dropping the key
   or VT sequence.
@@ -22,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Documented the payload contract for chunked input.
+- **Input parser**: `InputEvent::Dcs(&[u8])` now borrows the parser accumulator,
+  as `InputEvent::Osc` does, rather than the input buffer.
 
 ## [0.15.0] - 2025-10-20
 
