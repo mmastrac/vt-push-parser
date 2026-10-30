@@ -812,6 +812,9 @@ pub enum VTEvent<'a> {
     // Plain printable text from GROUND (coalesced)
     Raw(&'a [u8]),
 
+    // Validated UTF-8 sequence from GROUND
+    Utf8(&'a [u8]),
+
     // C0 control (EXECUTE)
     C0(u8),
 
@@ -857,6 +860,12 @@ impl<'a> std::fmt::Debug for VTEvent<'a> {
         match self {
             Raw(s) => {
                 write!(f, "Raw('")?;
+                fmt_utf8_bytes_with_ascii_control(f, s)?;
+                write!(f, "')")?;
+                Ok(())
+            }
+            Utf8(s) => {
+                write!(f, "Utf8('")?;
                 fmt_utf8_bytes_with_ascii_control(f, s)?;
                 write!(f, "')")?;
                 Ok(())
@@ -913,6 +922,7 @@ impl<'a> VTEvent<'a> {
 
         match self {
             Raw(s) => s.len(),
+            Utf8(s) => s.len(),
             C0(_) => 1,
             Esc(esc) => esc.intermediates.len() + 2 + esc.private.is_some() as usize,
             EscInvalid(esc_invalid) => {
@@ -970,7 +980,7 @@ impl<'a> VTEvent<'a> {
         }
 
         match self {
-            Raw(s) | OscData(s) | DcsData(s) => {
+            Raw(s) | OscData(s) | DcsData(s) | Utf8(s) => {
                 buf[..s.len()].copy_from_slice(s);
             }
             EscInvalid(esc_invalid) => {
@@ -1107,7 +1117,7 @@ impl<'a> VTEvent<'a> {
         use VTEvent::*;
         let mut len = 0;
         match self {
-            Raw(s) | OscData(s) | DcsData(s) => {
+            Raw(s) | OscData(s) | DcsData(s) | Utf8(s) => {
                 writer.write_all(s)?;
                 len = s.len();
             }
@@ -1242,6 +1252,7 @@ impl<'a> VTEvent<'a> {
         use VTEvent::*;
         match self {
             Raw(s) => VTOwnedEvent::Raw(s.to_vec()),
+            Utf8(s) => VTOwnedEvent::Utf8(s.to_vec()),
             C0(b) => VTOwnedEvent::C0(*b),
             Esc(esc) => VTOwnedEvent::Esc(*esc),
             EscInvalid(esc_invalid) => VTOwnedEvent::EscInvalid(*esc_invalid),
@@ -1445,6 +1456,7 @@ impl<'b> IntoIterator for &'b ParamBufOwned {
 #[derive(Clone, PartialEq, Eq)]
 pub enum VTOwnedEvent {
     Raw(Vec<u8>),
+    Utf8(Vec<u8>),
     C0(u8),
     Esc(Esc),
     EscInvalid(EscInvalid),
@@ -1471,6 +1483,7 @@ impl VTOwnedEvent {
     pub fn borrow(&self) -> VTEvent<'_> {
         match self {
             VTOwnedEvent::Raw(s) => VTEvent::Raw(s),
+            VTOwnedEvent::Utf8(s) => VTEvent::Utf8(s),
             VTOwnedEvent::C0(b) => VTEvent::C0(*b),
             VTOwnedEvent::Esc(esc) => VTEvent::Esc(*esc),
             VTOwnedEvent::EscInvalid(esc_invalid) => VTEvent::EscInvalid(*esc_invalid),
