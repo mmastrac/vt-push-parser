@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Input parser**: a pending key prefix (`ESC`, `ESC [`, ...) at the end of a
   chunk is carried into the next `feed_with` call instead of dropping the key
   or VT sequence.
+- **Input parser**: `VTPushParserInput::feed_with` no longer drops the rest of
+  a feed when the parser stops on a held `ESC` inside an OSC/DCS payload. Text
+  after a DCS whose payload holds an escape, and a DCS split at such an `ESC`,
+  used to lose the DCS and any text after it.
 
 ### Changed
 
