@@ -1257,4 +1257,92 @@ mod tests {
         assert!(compared > 800, "compared too few splits: {compared}");
         assert!(skipped_dcs > 0, "DCS exclusion did not trigger");
     }
+
+    /// KeyChar events for plain text, the way `dispatch_vt!` emits it.
+    fn key_chars(text: &str) -> Vec<String> {
+        text.chars()
+            .map(|c| format!("KeyChar({c:?}, Modifier(0))"))
+            .collect()
+    }
+
+    /// Feed `bytes` whole and then at every interior split point, asserting the
+    /// split feeds are event-identical to the whole feed. Returns the whole
+    /// feed's event stream.
+    fn assert_split_invariant(bytes: &[u8]) -> Vec<String> {
+        let whole = feed_chunks(vec![bytes.to_vec()]);
+        for split in 1..bytes.len() {
+            let split_events = feed_chunks(vec![bytes[..split].to_vec(), bytes[split..].to_vec()]);
+            assert_eq!(split_events, whole, "event stream changed, split at {split}");
+        }
+        whole
+    }
+
+    #[test]
+    #[timeout(10_000)]
+    fn trailing_text_after_an_ignored_dcs_is_not_lost() {
+        // The ignored DCS surfaces no event of its own; the text after it must
+        // still arrive.
+        let events = assert_split_invariant(b"Hello\x1bP:1;2:3|data\x1b\\World");
+        assert_eq!(events, key_chars("HelloWorld"));
+    }
+
+    #[test]
+    #[timeout(10_000)]
+    fn trailing_text_after_a_cancelled_csi_is_not_lost() {
+        // CAN and SUB both cancel the CSI; the text after it must still arrive.
+        for bytes in [
+            b"Hello\x1b[1;2\x18World".as_slice(),
+            b"Hello\x1b[1;2\x1aWorld".as_slice(),
+        ] {
+            let events = assert_split_invariant(bytes);
+            assert_eq!(events, key_chars("HelloWorld"));
+        }
+    }
+
+    #[test]
+    #[timeout(10_000)]
+    fn ignored_dcs_split_three_ways_is_not_lost() {
+        let whole = feed_chunks(vec![b"Hello\x1bP:1;2:3|data\x1b\\World".to_vec()]);
+        assert_eq!(whole, key_chars("HelloWorld"));
+        let three_ways = feed_chunks(vec![
+            b"Hello\x1bP".to_vec(),
+            b":1;2:3|".to_vec(),
+            b"data\x1b\\World".to_vec(),
+        ]);
+        assert_eq!(three_ways, whole);
+    }
+
+    #[test]
+    #[timeout(10_000)]
+    fn trailing_text_after_a_dcs_payload_holding_an_escape_is_not_lost() {
+        // In a single feed the parser holds the ESC inside the DCS payload and
+        // then stops; the rest of the feed, including the text after the DCS,
+        // used to be dropped. DEL ends the payload run, so it is not part of
+        // the emitted DCS payload.
+        let events = assert_split_invariant(b"Hi\x1bP1;2;3|\x1b\x7fdata\x1b\\World");
+        let mut expected = key_chars("Hi");
+        expected.push(describe_event(InputEvent::Dcs(&[27, 100, 97, 116, 97])));
+        expected.extend(key_chars("World"));
+        assert_eq!(events, expected);
+    }
+
+    #[test]
+    #[timeout(10_000)]
+    fn dcs_split_at_a_held_escape_keeps_the_trailing_text() {
+        // A chunk that ends on an ESC held inside a DCS payload. The DCS and the
+        // text after it used to be dropped, whole feed or split.
+        let bytes = b"Hi\x1bPq\x1b[38:2:12:34:56m\x1b\\World";
+        let whole = assert_split_invariant(bytes);
+        let mut expected = key_chars("Hi");
+        expected.push(describe_event(InputEvent::Dcs(b"\x1b[38:2:12:34:56m")));
+        expected.extend(key_chars("World"));
+        assert_eq!(whole, expected);
+
+        let three_ways = feed_chunks(vec![
+            b"Hi\x1bPq\x1b".to_vec(),
+            b"[38:2:12:34:56m".to_vec(),
+            b"\x1b\\World".to_vec(),
+        ]);
+        assert_eq!(three_ways, whole);
+    }
 }
