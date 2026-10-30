@@ -1199,48 +1199,10 @@ mod tests {
         assert_eq!(split, whole);
     }
 
-    /// True if `split` falls inside a DCS string (after `ESC P`, before its
-    /// terminator). `DcsEnd` payload accumulation is a separate task, so those
-    /// splits cannot be compared event-for-event yet.
-    fn split_inside_dcs(bytes: &[u8], split: usize) -> bool {
-        let mut i = 0;
-        while i < split {
-            if bytes[i] == 0x1b && bytes.get(i + 1) == Some(&b'P') {
-                i += 2;
-                let mut open = true;
-                while i < split {
-                    match bytes[i] {
-                        0x18 | 0x1a => {
-                            open = false;
-                            i += 1;
-                            break;
-                        }
-                        0x1b => {
-                            if bytes.get(i + 1) == Some(&b'\\') && i + 1 < split {
-                                open = false;
-                                i += 2;
-                                break;
-                            }
-                            i += 1;
-                        }
-                        _ => i += 1,
-                    }
-                }
-                if open {
-                    return true;
-                }
-            } else {
-                i += 1;
-            }
-        }
-        false
-    }
-
     #[test]
     #[timeout(10_000)]
     fn every_escape_split_has_the_whole_event_stream() {
         let mut compared = 0;
-        let mut skipped_dcs = 0;
         for line in ESCAPE_CORPUS.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -1249,10 +1211,6 @@ mod tests {
             let decoded = vt_push_parser::ascii::decode_string(line);
             let whole = feed_chunks(vec![decoded.clone()]);
             for split in 1..decoded.len() {
-                if split_inside_dcs(&decoded, split) {
-                    skipped_dcs += 1;
-                    continue;
-                }
                 compared += 1;
                 let split_events =
                     feed_chunks(vec![decoded[..split].to_vec(), decoded[split..].to_vec()]);
@@ -1262,8 +1220,7 @@ mod tests {
                 );
             }
         }
-        assert!(compared > 800, "compared too few splits: {compared}");
-        assert!(skipped_dcs > 0, "DCS exclusion did not trigger");
+        assert!(compared > 1200, "compared too few splits: {compared}");
     }
 
     /// KeyChar events for plain text, the way `dispatch_vt!` emits it.
@@ -1280,7 +1237,10 @@ mod tests {
         let whole = feed_chunks(vec![bytes.to_vec()]);
         for split in 1..bytes.len() {
             let split_events = feed_chunks(vec![bytes[..split].to_vec(), bytes[split..].to_vec()]);
-            assert_eq!(split_events, whole, "event stream changed, split at {split}");
+            assert_eq!(
+                split_events, whole,
+                "event stream changed, split at {split}"
+            );
         }
         whole
     }
