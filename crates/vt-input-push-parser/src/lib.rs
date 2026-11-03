@@ -1282,9 +1282,7 @@ mod tests {
     #[timeout(10_000)]
     fn trailing_text_after_a_dcs_payload_holding_an_escape_is_not_lost() {
         // In a single feed the parser holds the ESC inside the DCS payload and
-        // then stops; the rest of the feed, including the text after the DCS,
-        // used to be dropped. DEL ends the payload run, so it is not part of
-        // the emitted DCS payload.
+        // then stops.
         let events = assert_split_invariant(b"Hi\x1bP1;2;3|\x1b\x7fdata\x1b\\World");
         let mut expected = key_chars("Hi");
         expected.push(describe_event(InputEvent::Dcs(&[27, 100, 97, 116, 97])));
