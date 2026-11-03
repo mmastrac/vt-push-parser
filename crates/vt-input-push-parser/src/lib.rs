@@ -586,9 +586,7 @@ impl VTPushParserInput {
                 let data_accumulator = &mut self.data_accumulator;
                 let read = self.parser.feed_with_abortable(bytes, |event: VTEvent| {
                     // String payload is not surfaced on its own: keep parsing
-                    // rather than stopping here. Stopping mid-string aborts
-                    // the parser's held-byte flush, which reports that it
-                    // consumed nothing and would drop the rest of the feed.
+                    // rather than stopping here.
                     let continue_parsing =
                         matches!(&event, VTEvent::DcsData(_) | VTEvent::OscData(_));
                     let action = handle_vt_event(event, &mut cb);
