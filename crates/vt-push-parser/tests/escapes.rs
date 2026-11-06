@@ -17,7 +17,9 @@ macro_rules! callback {
         |vt_input: VTEvent<'_>| {
             let result = &mut $result;
             match vt_input {
-                VTEvent::Raw(s) => {
+                // `INTEREST_NONE` never asks for `Utf8`, but it is ground text
+                // exactly like `Raw` and would be reported the same way.
+                VTEvent::Raw(s) | VTEvent::Utf8(s) => {
                     if let Some(VTAccumulator::Raw(acc)) = result.last_mut() {
                         acc.push_str(&encode_string(s));
                     } else {
